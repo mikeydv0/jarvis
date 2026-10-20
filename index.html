@@ -433,10 +433,21 @@ const NICE = { 'wall': 'WALL', 'floor': 'FLOOR', 'ceiling': 'CEILING', 'table': 
   'shelf': 'SHELF', 'other': 'OBJECT', 'global mesh': 'ROOM MESH' };
 function polyArea(pts) { let a = 0; for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; a += p.x * q.z - q.x * p.z; } return Math.abs(a) / 2; }
 
-function upsertPlane(key, polygon, label, matrixArray, ver = 0) {
+// src = XRPlane or a plain polygon array. XR getters (polygon / vertices / indices) can copy data on every read,
+// so they are only touched when a surface is (re)built, and a surface rebuilds at most every 1.5 s.
+function needsBuild(s, ver) { return !s || (ver !== undefined && s.ver !== ver && performance.now() - s.built > 1500); }
+function setPose(s, matrixArray) {
+  const m = s.group.matrix.elements; let same = true;
+  for (let i = 0; i < 16; i++) if (Math.abs(m[i] - matrixArray[i]) > 1e-5) { same = false; break; }
+  if (same && s.world.length === s.local.length) return;
+  s.group.matrix.fromArray(matrixArray); s.group.matrixWorldNeedsUpdate = true; s.group.updateMatrixWorld(true);
+  s.world = s.local.map(p => p.clone().applyMatrix4(s.group.matrixWorld));
+}
+function upsertPlane(key, src, label, matrixArray, ver = 0) {
   let s = surfaces.get(key);
-  if (!s || s.ver !== ver) {
-    if (s) { scene.remove(s.group); s.fill.geometry.dispose(); }
+  if (needsBuild(s, ver)) {
+    const polygon = Array.isArray(src) ? src : src.polygon;
+    if (s) { scene.remove(s.group); s.fill.geometry.dispose(); s.spr.material.map.dispose(); }
     const shape = new THREE.Shape(polygon.map(p => new THREE.Vector2(p.x, -p.z)));
     const geo = new THREE.ShapeGeometry(shape); geo.rotateX(-Math.PI / 2);
     const fill = new THREE.Mesh(geo, surfaceMat(label === 'floor' ? 0.15 : 0.32)); fill.renderOrder = 2;
@@ -448,43 +459,43 @@ function upsertPlane(key, polygon, label, matrixArray, ver = 0) {
     const spr = labelSprite((NICE[label] || (label || 'SURFACE').toUpperCase())); spr.position.set(cx, 0.06, cz); group.add(spr);
     scene.add(group);
     const old = s; s = { group, fill, line, spr, local: polygon.map(p => new THREE.Vector3(p.x, 0, p.z)), world: [], area: polyArea(polygon),
-      label, hit: old ? old.hit : 0, ver, kind: 'plane' };
+      label, hit: old ? old.hit : 0, ver, kind: 'plane', built: performance.now() };
     fill.userData.surface = s;
     surfaces.set(key, s);
     rebuildHitTargets();
   }
-  s.group.matrix.fromArray(matrixArray); s.group.matrixWorldNeedsUpdate = true; s.group.updateMatrixWorld(true);
-  s.world = s.local.map(p => p.clone().applyMatrix4(s.group.matrixWorld));
-  s.seen = performance.now();
+  setPose(s, matrixArray);
   return s;
 }
-function upsertMesh(key, vertices, indices, label, matrixArray, ver = 0) {
+function upsertMesh(key, src, label, matrixArray, ver = 0) {
   let s = surfaces.get(key);
-  if (!s || s.ver !== ver) {
-    if (s) { scene.remove(s.group); s.fill.geometry.dispose(); }
+  if (needsBuild(s, ver)) {
+    const vertices = src.vertices, indices = src.indices;
+    if (s) { scene.remove(s.group); s.fill.geometry.dispose(); s.line.geometry.dispose(); s.spr.material.map.dispose(); }
+    const heavy = label === 'global mesh' || indices.length / 3 > 3000;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices), 3));
     geo.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
     const fill = new THREE.Mesh(geo, surfaceMat(0.22)); fill.renderOrder = 3;
-    const wire = new THREE.LineSegments(new THREE.WireframeGeometry(geo),
-      new THREE.LineBasicMaterial({ color: 0x9ff0ff, transparent: true, opacity: 0, depthWrite: false }));
+    const wire = heavy ? new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial())
+      : new THREE.LineSegments(new THREE.EdgesGeometry(geo, 30),
+        new THREE.LineBasicMaterial({ color: 0x9ff0ff, transparent: true, opacity: 0, depthWrite: false }));
     const group = new THREE.Group(); group.matrixAutoUpdate = false; group.add(fill, wire);
     geo.computeBoundingBox(); const c = new THREE.Vector3(); geo.boundingBox.getCenter(c);
     const spr = labelSprite((NICE[label] || (label || 'OBJECT').toUpperCase())); spr.position.copy(c); spr.position.y = geo.boundingBox.max.y + 0.08;
-    if (label === 'global mesh') spr.visible = false;
     group.add(spr); scene.add(group);
-    const old = s; s = { group, fill, line: wire, spr, local: [], world: [], area: 0, label, hit: old ? old.hit : 0, ver, kind: 'mesh' };
+    if (heavy) { fill.visible = wire.visible = spr.visible = false; }
+    const old = s; s = { group, fill, line: wire, spr, local: [], world: [], area: 0, label, hit: old ? old.hit : 0, ver, kind: 'mesh', heavy, built: performance.now() };
     fill.userData.surface = s;
     surfaces.set(key, s); rebuildHitTargets();
   }
-  s.group.matrix.fromArray(matrixArray); s.group.matrixWorldNeedsUpdate = true; s.group.updateMatrixWorld(true);
-  s.seen = performance.now();
+  setPose(s, matrixArray);
   return s;
 }
-const gazeTargets = [];
+const gazeTargets = [], heavyTargets = [];
 function rebuildHitTargets() {
-  hitTargets.length = 0; gazeTargets.length = 0;
-  for (const s of surfaces.values()) { hitTargets.push(s.fill); if (s.label !== 'global mesh') gazeTargets.push(s.fill); }
+  hitTargets.length = 0; gazeTargets.length = 0; heavyTargets.length = 0;
+  for (const s of surfaces.values()) { if (s.heavy) heavyTargets.push(s.fill); else { hitTargets.push(s.fill); gazeTargets.push(s.fill); } }
 }
 function dropSurface(key) { const s = surfaces.get(key); if (!s) return; scene.remove(s.group); s.fill.geometry.dispose(); surfaces.delete(key); rebuildHitTargets(); }
 
@@ -546,7 +557,7 @@ function fire(origin, dir) {
   state.power = Math.max(0, state.power - 0.06); state.blasts++;
   blast();
   ray.set(origin, dir); ray.far = 12;
-  const hit = ray.intersectObjects(hitTargets, false)[0];
+  const hit = ray.intersectObjects(hitTargets, false)[0] || ray.intersectObjects(heavyTargets, false)[0];
   const len = hit ? hit.distance : 10;
   const core = new THREE.Mesh(beamGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
   const halo = new THREE.Mesh(beamGeo, new THREE.MeshBasicMaterial({ color: 0x3fc8ff, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }));
@@ -726,7 +737,7 @@ function loop(t, frame) {
         const key = pl.__k || (pl.__k = 'p' + Math.random().toString(36).slice(2));
         alive.add(key);
         const pp = frame.getPose(pl.planeSpace, ref); if (!pp) continue;
-        upsertPlane(key, pl.polygon, pl.semanticLabel || pl.orientation, pp.transform.matrix, pl.lastChangedTime);
+        upsertPlane(key, pl, pl.semanticLabel || pl.orientation, pp.transform.matrix, pl.lastChangedTime);
       }
       for (const k of [...surfaces.keys()]) if (k[0] === 'p' && !alive.has(k)) dropSurface(k);
     }
@@ -736,7 +747,7 @@ function loop(t, frame) {
         const key = me.__k || (me.__k = 'm' + Math.random().toString(36).slice(2));
         alive.add(key);
         const mp = frame.getPose(me.meshSpace, ref); if (!mp) continue;
-        upsertMesh(key, me.vertices, me.indices, me.semanticLabel || 'other', mp.transform.matrix, me.lastChangedTime);
+        upsertMesh(key, me, me.semanticLabel || 'other', mp.transform.matrix, me.lastChangedTime);
       }
       for (const k of [...surfaces.keys()]) if (k[0] === 'm' && !alive.has(k)) dropSurface(k);
     }
@@ -790,6 +801,7 @@ function loop(t, frame) {
     s.hit = Math.max(0, s.hit - dt * 0.6);
     s.fill.material.uniforms.uHit.value = s.hit;
     const lit = state.scanning ? Math.max(0, 1 - Math.abs(head.pos.distanceTo(tmpV.setFromMatrixPosition(s.group.matrixWorld)) - state.scanR) / 1.5) : 0;
+    if (s.heavy) continue;
     s.fill.visible = state.scanning || s.hit > 0.01;
     if (s.kind === 'mesh') s.line.visible = state.scanning;
     s.line.material.opacity = (state.bootDone ? 0.28 : 0) + lit * 0.7;
