@@ -514,21 +514,142 @@ scene.add(lockRing);
 
 // hint text, head-locked, low in view
 const hint = (() => {
-  const c = document.createElement('canvas'); c.width = 900; c.height = 90; const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
-  const m = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.062), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false }));
+  const c = document.createElement('canvas'); c.width = 900; c.height = 130; const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.0896), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false }));
   m.renderOrder = 50; scene.add(m); return { c, g: c.getContext('2d'), tex, m, text: null, a: 0 };
 })();
-function setHint(t) {
-  if (t === hint.text) return; hint.text = t;
+function setHint(t, sub = '') {
+  if (t + '|' + sub === hint.text) return; hint.text = t + '|' + sub;
   const { g, c } = hint; g.clearRect(0, 0, c.width, c.height);
+  if (sub) { g.font = '600 24px "Segoe UI", Arial'; g.textAlign = 'center'; g.fillStyle = 'rgba(160,210,255,0.75)'; g.shadowBlur = 0; g.fillText(sub, c.width / 2, 112); }
   if (t) { g.font = '600 40px "Segoe UI", Arial'; g.textAlign = 'center'; g.fillStyle = '#d8eeff'; g.shadowColor = '#3fa2ff'; g.shadowBlur = 16; g.fillText(t, c.width / 2, 58); }
   hint.tex.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------- LIVE DEPTH (Quest 3 depth sensor): see the real monitor / bed / chair right now
+// The XR depth texture is copied into a small render target (packed into RGBA8), read back, and turned into world points.
+// Two possible encodings are auto-detected: 'ndc' (window depth in the view's projection, what three.js uses on Quest)
+// or 'lin' (meters). The status shows on the hint line so the player can tell me which one their headset gave.
+const DEP = { W: 160, H: 160, ok: false, at: 0, mode: '', sampler: 'f', status: 'LIVE DEPTH: OFF', binding: null, emptyCount: 0,
+  proj: new THREE.Matrix4(), invProj: new THREE.Matrix4(), viewM: new THREE.Matrix4(), viewInv: new THREE.Matrix4(), toM: 1 };
+DEP.D = new Float32Array(DEP.W * DEP.H);           // depth value per pixel (ndc 0..1 or meters), 0 = none
+DEP.P = new Float32Array(DEP.W * DEP.H * 3);       // world point cache
+DEP.Pok = new Int32Array(DEP.W * DEP.H);           // cache stamp
+DEP.stamp = 1;
+DEP.buf = new Uint8Array(DEP.W * DEP.H * 4);
+DEP.rt = new THREE.WebGLRenderTarget(DEP.W, DEP.H, { depthBuffer: false, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+DEP.tex = new THREE.DataArrayTexture(null, 1, 1, 1);   // shell: its GL texture is swapped for the XR depth texture every read
+DEP.cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const depVS = `out vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+const depMat = {
+  f: new THREE.ShaderMaterial({ glslVersion: THREE.GLSL3, uniforms: { tDepth: { value: DEP.tex }, uLayer: { value: 0 } }, vertexShader: depVS,
+    fragmentShader: `precision highp float; precision highp sampler2DArray; uniform sampler2DArray tDepth; uniform int uLayer; in vec2 vUv;
+      void main() { float d = texture(tDepth, vec3(vUv, float(uLayer))).r / 16.0;            // /16 so meters up to 16 also fit
+        vec3 e = fract(d * vec3(1.0, 255.0, 65025.0)); e -= e.yzz * vec3(1.0 / 255.0, 1.0 / 255.0, 0.0); gl_FragColor = vec4(e, 1.0); }` }),
+  u: new THREE.ShaderMaterial({ glslVersion: THREE.GLSL3, uniforms: { tDepth: { value: DEP.tex }, uLayer: { value: 0 } }, vertexShader: depVS,
+    fragmentShader: `precision highp float; precision highp usampler2DArray; uniform usampler2DArray tDepth; uniform int uLayer; in vec2 vUv;
+      void main() { uint v = texture(tDepth, vec3(vUv, float(uLayer))).r; gl_FragColor = vec4(float(v & 255u) / 255.0, float((v >> 8u) & 255u) / 255.0, 0.0, 1.0); }` }),
+};
+DEP.quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), depMat.f); DEP.quad.frustumCulled = false;
+DEP.scene = new THREE.Scene(); DEP.scene.add(DEP.quad);
+
+function depthRead(frame, pose) {
+  const session = frame.session;
+  if (!session.enabledFeatures || !session.enabledFeatures.includes('depth-sensing')) { DEP.status = 'LIVE DEPTH: NOT ALLOWED'; return; }
+  try { DEP.binding = DEP.binding || new XRWebGLBinding(session, renderer.getContext()); } catch (e) { DEP.status = 'LIVE DEPTH: NO BINDING'; return; }
+  const view = pose.views[0]; let info;
+  try { info = DEP.binding.getDepthInformation(view); } catch (e) { DEP.status = 'LIVE DEPTH: ' + e.name; return; }
+  if (!info || !info.texture) { DEP.status = 'LIVE DEPTH: WAITING'; return; }
+  renderer.properties.get(DEP.tex).__webglTexture = info.texture;
+  const mat = depMat[DEP.sampler]; mat.uniforms.uLayer.value = info.imageIndex || 0; DEP.quad.material = mat;
+  const prevRT = renderer.getRenderTarget(), xrOn = renderer.xr.enabled;
+  renderer.xr.enabled = false; renderer.setRenderTarget(DEP.rt); renderer.render(DEP.scene, DEP.cam);
+  renderer.readRenderTargetPixels(DEP.rt, 0, 0, DEP.W, DEP.H, DEP.buf);
+  renderer.setRenderTarget(prevRT); renderer.xr.enabled = xrOn;
+  // decode
+  const b = DEP.buf, D = DEP.D; let valid = 0, sum = 0, hi = 0;
+  for (let i = 0, n = DEP.W * DEP.H; i < n; i++) {
+    const v = DEP.sampler === 'f' ? (b[i * 4] / 255 + b[i * 4 + 1] / 65025 + b[i * 4 + 2] / 16581375) * 16 : (b[i * 4] + b[i * 4 + 1] * 256);
+    D[i] = v; if (v > 0) { valid++; sum += v; if (DEP.sampler === 'f' && v > 0.95 && v <= 1.0) hi++; }
+  }
+  if (valid < 50) {   // nothing came through: try the integer sampler once
+    if (++DEP.emptyCount === 3 && DEP.sampler === 'f') DEP.sampler = 'u';
+    DEP.status = 'LIVE DEPTH: EMPTY'; DEP.ok = false; return;
+  }
+  DEP.mode = DEP.sampler === 'u' ? 'lin' : (hi > valid * 0.6 ? 'ndc' : 'lin');
+  DEP.toM = DEP.sampler === 'u' ? (info.rawValueToMeters || 0.001) : (DEP.mode === 'lin' ? (info.rawValueToMeters || 1) : 1);
+  const P = info.projectionMatrix || view.projectionMatrix, X = (info.transform || view.transform).matrix;
+  DEP.proj.fromArray(P); DEP.invProj.copy(DEP.proj).invert(); DEP.viewM.fromArray(X); DEP.viewInv.copy(DEP.viewM).invert();
+  DEP.stamp++; DEP.ok = true; DEP.at = performance.now();
+  DEP.status = 'LIVE DEPTH: ON (' + DEP.mode + ')';
+}
+const _dv = new THREE.Vector4();
+function depthWorld(i, j, out) {   // pixel -> world point (cached per read)
+  const k = j * DEP.W + i;
+  if (DEP.Pok[k] === DEP.stamp) return out.set(DEP.P[k * 3], DEP.P[k * 3 + 1], DEP.P[k * 3 + 2]);
+  const d = DEP.D[k]; if (!(d > 0)) return null;
+  const x = ((i + 0.5) / DEP.W) * 2 - 1, y = ((j + 0.5) / DEP.H) * 2 - 1;
+  if (DEP.mode === 'ndc') { _dv.set(x, y, d * 2 - 1, 1).applyMatrix4(DEP.invProj); _dv.divideScalar(_dv.w); }
+  else { _dv.set(x, y, 1, 1).applyMatrix4(DEP.invProj); _dv.divideScalar(_dv.w); const m = d * DEP.toM; _dv.multiplyScalar(m / -_dv.z); _dv.w = 1; }
+  _dv.applyMatrix4(DEP.viewM);
+  DEP.P[k * 3] = _dv.x; DEP.P[k * 3 + 1] = _dv.y; DEP.P[k * 3 + 2] = _dv.z; DEP.Pok[k] = DEP.stamp;
+  return out.set(_dv.x, _dv.y, _dv.z);
+}
+function depthRay(o, d) {   // march the ray until it goes behind the real surface the sensor sees
+  const p = new THREE.Vector3(), c = new THREE.Vector4();
+  for (let t = 0.25; t < 6; t += 0.02) {
+    p.copy(o).addScaledVector(d, t);
+    c.set(p.x, p.y, p.z, 1).applyMatrix4(DEP.viewInv); const viewZ = c.z; c.applyMatrix4(DEP.proj);
+    if (c.w <= 0) continue;
+    const nx = c.x / c.w, ny = c.y / c.w; if (nx < -1 || nx > 1 || ny < -1 || ny > 1) continue;
+    const i = Math.min(DEP.W - 1, Math.floor((nx * 0.5 + 0.5) * DEP.W)), j = Math.min(DEP.H - 1, Math.floor((ny * 0.5 + 0.5) * DEP.H));
+    const dm = DEP.D[j * DEP.W + i]; if (!(dm > 0)) continue;
+    const behind = DEP.mode === 'ndc' ? (c.z / c.w) * 0.5 + 0.5 >= dm : -viewZ >= dm * DEP.toM;
+    if (behind) { const w = depthWorld(i, j, new THREE.Vector3()); return w ? { kind: 'depth', i, j, p: w } : null; }
+  }
+  return null;
+}
+// grow the object out from the pointed pixel: neighbours join while the surface is continuous (no depth jump),
+// not floor / ceiling, and within 0.9 m. Then triangulate the patch = the REAL visible shape.
+function depthObject(hit) {
+  const W = DEP.W, H = DEP.H, mask = new Uint8Array(W * H), q = [hit.j * W + hit.i];
+  mask[q[0]] = 1;
+  const a = new THREE.Vector3(), b = new THREE.Vector3();
+  const headD = hit.p.distanceTo(head.pos), jump = 0.025 + 0.02 * headD;
+  let n = 0, x0 = hit.i, x1 = hit.i, y0 = hit.j, y1 = hit.j;
+  while (q.length && n < 9000) {
+    const k = q.pop(); n++;
+    const i = k % W, j = (k / W) | 0; if (!depthWorld(i, j, a)) continue;
+    for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const ni = i + di, nj = j + dj; if (ni < 0 || nj < 0 || ni >= W || nj >= H) continue;
+      const nk = nj * W + ni; if (mask[nk]) continue;
+      if (!depthWorld(ni, nj, b)) continue;
+      if (b.y < 0.05 || b.y > 2.2 || b.distanceTo(a) > jump || b.distanceTo(hit.p) > 0.9) continue;
+      mask[nk] = 1; q.push(nk);
+      if (ni < x0) x0 = ni; if (ni > x1) x1 = ni; if (nj < y0) y0 = nj; if (nj > y1) y1 = nj;
+    }
+  }
+  let step = 2, out = [];
+  const pa = new THREE.Vector3(), pb = new THREE.Vector3(), pc = new THREE.Vector3(), pd = new THREE.Vector3();
+  const tri = (p, q2, r) => { if (p.distanceTo(q2) > 0.12 || q2.distanceTo(r) > 0.12 || r.distanceTo(p) > 0.12) return; out.push(p.x, p.y, p.z, q2.x, q2.y, q2.z, r.x, r.y, r.z); };
+  for (let tries = 0; tries < 3; tries++) {
+    out = [];
+    for (let j = y0; j + step <= y1; j += step) for (let i = x0; i + step <= x1; i += step) {
+      const k00 = j * W + i, k10 = k00 + step, k01 = k00 + step * W, k11 = k01 + step;
+      if (!mask[k00] || !mask[k10] || !mask[k01] || !mask[k11]) continue;
+      depthWorld(i, j, pa); depthWorld(i + step, j, pb); depthWorld(i, j + step, pc); depthWorld(i + step, j + step, pd);
+      tri(pa, pb, pd); tri(pa, pd, pc);
+    }
+    if (out.length / 9 <= 2400) break; step++;
+  }
+  return new Float32Array(out);
 }
 
 // ---------------------------------------------------------------- interaction state
 const st = { started: false, hover: null, hoverT: 0, locked: null, lockT: 0, lastAim: 0, lastBuild: 0, aim: null, capTried: false, needPinch: false, noCapture: false };
 const ray = new THREE.Raycaster();
 function aimHit(o, d) {
+  if (DEP.ok && performance.now() - DEP.at < 600) { const dh = depthRay(o, d); if (dh) return dh; }   // live depth first
   ray.set(o, d); ray.far = 7;
   const ph = ray.intersectObjects(planeHits, false).find(x => !x.object.userData.src.gone);
   const mh = rayMeshes(o, d);
@@ -537,6 +658,7 @@ function aimHit(o, d) {
   return null;
 }
 function targetFor(h) {
+  if (h.kind === 'depth') { const arr = depthObject(h); return arr.length >= 27 ? makeFrag(arr, { anchor: h.p.clone(), depthObj: true }) : null; }
   if (h.kind === 'mesh') {
     const ids = chunkAt(h.m, h.p); if (ids.length < 3) return null;
     const arr = new Float32Array(ids.length * 9); ids.forEach((t, i) => arr.set(h.m.P.subarray(t * 9, t * 9 + 9), i * 9));
@@ -577,6 +699,7 @@ function updateInteraction(dt, now) {
   let src = null;
   if (aimHand) src = aimHand.rayOK ? { o: aimHand.rayO, d: aimHand.rayD } : { o: aimHand.J[JI['index-finger-tip']], d: tA.copy(aimHand.J[JI['index-finger-tip']]).sub(aimHand.J[JI['index-finger-phalanx-proximal']]).normalize().clone() };
   else if (st.fakeAim) src = st.fakeAim;
+  st.wantDepth = !!src || now - st.t0 < 6000;
   if (src && now - st.lastAim > 50) { st.lastAim = now; st.aim = aimHit(src.o, src.d); }
   if (!src) st.aim = null;
   const hit = st.aim;
@@ -589,8 +712,8 @@ function updateInteraction(dt, now) {
   // hover: light up the REAL shape you're pointing at; hold 0.4 s to lock
   if (hit) {
     const h = st.hover;
-    const same = h && !h.fading && h.state === 'hover' && ((hit.kind === 'plane' && h.plane === hit.s) || (hit.kind === 'mesh' && h.m === hit.m && hit.p.distanceTo(h.anchor) < 0.3));
-    const onLocked = st.locked && st.locked.state === 'locked' && ((hit.kind === 'plane' && st.locked.plane === hit.s) || (hit.kind === 'mesh' && st.locked.m === hit.m && hit.p.distanceTo(st.locked.anchor) < 0.3));
+    const same = h && !h.fading && h.state === 'hover' && ((hit.kind === 'depth' && h.depthObj && hit.p.distanceTo(h.anchor) < 0.15) || (hit.kind === 'plane' && h.plane === hit.s) || (hit.kind === 'mesh' && h.m === hit.m && hit.p.distanceTo(h.anchor) < 0.3));
+    const onLocked = st.locked && st.locked.state === 'locked' && ((hit.kind === 'depth' && st.locked.depthObj && hit.p.distanceTo(st.locked.anchor) < 0.2) || (hit.kind === 'plane' && st.locked.plane === hit.s) || (hit.kind === 'mesh' && st.locked.m === hit.m && hit.p.distanceTo(st.locked.anchor) < 0.3));
     if (onLocked) { st.lockT = now; }
     else if (same) st.hoverT += dt;
     else if (now - st.lastBuild > 160) {
@@ -617,7 +740,7 @@ function updateInteraction(dt, now) {
     else if (!hands.left.has && !hands.right.has && !PREVIEW) t = st.ctrl ? 'PUT THE CONTROLLERS DOWN' : 'SHOW ME YOUR HANDS';
     else t = 'POINT AT SOMETHING';
   }
-  setHint(t);
+  setHint(t, (PREVIEW || now - st.t0 < 15000) ? DEP.status : '');
 }
 
 // ---------------------------------------------------------------- main loop
@@ -642,6 +765,7 @@ function loop(time, frame) {
         const mp = frame.getPose(me.meshSpace, ref); if (mp) upsertMesh(key, me, me.semanticLabel || 'other', mp.transform.matrix, me.lastChangedTime);
       }
     }
+    if (pose && st.wantDepth && now - DEP.at > 140 && now - (DEP.tried || 0) > 140) { DEP.tried = now; depthRead(frame, pose); }
     hands.left.has = hands.right.has = false; hands.left.rayOK = hands.right.rayOK = false; st.ctrl = false;
     for (const src of frame.session.inputSources) {
       if (src.hand) {
@@ -689,8 +813,24 @@ function runDemo() {
   if (Q.has('crush')) at(4.2, 'c1', () => onGesture('fist'));
   if (Q.has('release')) at(6.0, 'r1', () => onGesture('open'));
 }
+function fakeDepth() {
+  camera.updateMatrixWorld(); camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+  DEP.proj.copy(camera.projectionMatrix); DEP.invProj.copy(camera.projectionMatrixInverse); DEP.viewM.copy(camera.matrixWorld); DEP.viewInv.copy(camera.matrixWorldInverse);
+  DEP.mode = 'ndc'; DEP.toM = 1;
+  const o = camera.position.clone(), v = new THREE.Vector4(), dir = new THREE.Vector3(), c = new THREE.Vector4(), all = [...planes.values()].map(s => s.hit);
+  for (let j = 0; j < DEP.H; j++) for (let i = 0; i < DEP.W; i++) {
+    v.set(((i + 0.5) / DEP.W) * 2 - 1, ((j + 0.5) / DEP.H) * 2 - 1, 1, 1).applyMatrix4(DEP.invProj); v.divideScalar(v.w).applyMatrix4(DEP.viewM);
+    dir.set(v.x, v.y, v.z).sub(o).normalize();
+    ray.set(o, dir); ray.far = 8; const ph = ray.intersectObjects(all, false)[0], mh = rayMeshes(o, dir, 8);
+    let t = Math.min(ph ? ph.distance : Infinity, mh ? mh.t : Infinity);
+    if (!isFinite(t)) { DEP.D[j * DEP.W + i] = 0; continue; }
+    const p = o.clone().addScaledVector(dir, t); c.set(p.x, p.y, p.z, 1).applyMatrix4(DEP.viewInv).applyMatrix4(DEP.proj);
+    DEP.D[j * DEP.W + i] = (c.z / c.w) * 0.5 + 0.5;
+  }
+  DEP.stamp++; DEP.ok = true; DEP.at = 1e15; DEP.status = 'LIVE DEPTH: PREVIEW (fake room)';
+}
 function demo() {
-  demoT = 0;
+  demoT = 0; step(0, performance.now()); fakeDepth();
   const T = parseFloat(Q.get('t') || '0'); let fake = performance.now();
   for (let i = 0; i < T * 60; i++) { fake += 1000 / 60; step(1 / 60, fake); }
   lastT = performance.now();
@@ -707,7 +847,8 @@ async function enter() {
   }
   try {
     const session = await navigator.xr.requestSession('immersive-ar', {
-      requiredFeatures: ['local-floor'], optionalFeatures: ['hand-tracking', 'plane-detection', 'mesh-detection'],
+      requiredFeatures: ['local-floor'], optionalFeatures: ['hand-tracking', 'plane-detection', 'mesh-detection', 'depth-sensing'],
+      depthSensing: { usagePreference: ['gpu-optimized'], dataFormatPreference: ['float32', 'luminance-alpha', 'unsigned-short'] },
     });
     renderer.xr.setReferenceSpaceType('local-floor'); renderer.xr.setFoveation(1);
     await renderer.xr.setSession(session);
