@@ -1,0 +1,13 @@
+{
+  "name": "MANHATTAN",
+  "short_name": "MANHATTAN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#02060f",
+  "theme_color": "#02060f",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
