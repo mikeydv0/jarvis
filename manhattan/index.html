@@ -29,7 +29,7 @@
   <button id="go">BECOME</button>
   <div id="msg">Hands only. Point at something · open your hand · make a fist · open again</div>
   <a id="other" href="../">← J.A.R.V.I.S.</a>
-  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fc4ff;opacity:.8">VERSION 6 · LIVE DEPTH</div>
+  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fc4ff;opacity:.8">VERSION 7 · LIVE 3D MODEL</div>
 </div>
 <script type="module">
 import * as THREE from '../vendor/three.module.js';
@@ -273,6 +273,7 @@ function buildFakeRoom() {
   const wall = (x, z, ry) => new THREE.Matrix4().makeTranslation(x, 1.25, z).multiply(new THREE.Matrix4().makeRotationY(ry)).multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2)).toArray();
   upsertPlane('w1', rect(4.2, 2.5), 'wall', wall(0, -1.9, 0));
   upsertPlane('w2', rect(3.8, 2.5), 'wall', wall(-2.1, 0, Math.PI / 2));
+  upsertPlane('desk', rect(1.4, 0.7), 'table', new THREE.Matrix4().makeTranslation(0.2, 0.765, -1.3).toArray());
   // a fake "global mesh": desk + monitor + chair, finely tessellated like a real room scan
   const parts = [];
   const add = (g, x, y, z) => { g.translate(x, y, z); parts.push(g.toNonIndexed()); };
@@ -603,6 +604,7 @@ function depthRead(frame, pose) {
   const P = info.projectionMatrix || view.projectionMatrix, X = (info.transform || view.transform).matrix;
   DEP.proj.fromArray(P); DEP.invProj.copy(DEP.proj).invert(); DEP.viewM.fromArray(X); DEP.viewInv.copy(DEP.viewM).invert();
   DEP.stamp++; DEP.ok = true; DEP.at = performance.now();
+  fuseDepth();
   DEP.status = 'LIVE DEPTH: ON (' + DEP.src + ')';
   const cw = depthWorld(DEP.W >> 1, DEP.H >> 1, new THREE.Vector3());
   DEP.info.centerM = +D[(DEP.H >> 1) * DEP.W + (DEP.W >> 1)].toFixed(3); DEP.info.centerDist = cw ? +cw.distanceTo(head.pos).toFixed(2) : null;
@@ -669,10 +671,129 @@ function depthObject(hit) {
   return new Float32Array(out);
 }
 
+// ---------------------------------------------------------------- LIVE 3D MODEL: every depth frame is fused into a 3 cm block map of the room.
+// Pointing grabs the whole connected object (walls / floor / ceiling cut out), and it explodes into those real blocks.
+const VX = { S: 0.03, map: new Map(), max: 450000, structs: [], structsAt: -1, lastFuse: 0 };
+const vk = (ix, iy, iz) => ((ix + 2048) * 4096 + (iy + 2048)) * 4096 + (iz + 2048);
+const vkOf = (x, y, z) => vk(Math.floor(x / VX.S), Math.floor(y / VX.S), Math.floor(z / VX.S));
+function vkDecode(k) { const iz = k % 4096, r = (k - iz) / 4096, iy = r % 4096, ix = (r - iy) / 4096; return [ix - 2048, iy - 2048, iz - 2048]; }
+function fuseDepth() {
+  const p = new THREE.Vector3(), hp = [];
+  for (const side of ['left', 'right']) { const h = hands[side]; if (h.has) hp.push(h.J[0], h.J[JI['middle-finger-phalanx-proximal']], h.J[JI['index-finger-tip']]); }
+  for (let j = 0; j < DEP.H; j++) for (let i = 0; i < DEP.W; i++) {   // every pixel: a denser model
+    if (!(DEP.D[j * DEP.W + i] > 0) || DEP.D[j * DEP.W + i] * DEP.toM > 4.5) continue;
+    if (!depthWorld(i, j, p) || p.y < 0.03 || p.y > 2.6) continue;
+    let nearHand = false; for (const q of hp) if (p.distanceToSquared(q) < 0.15 * 0.15) { nearHand = true; break; }
+    if (nearHand) continue;                                    // don't model your own hands
+    const k = vkOf(p.x, p.y, p.z), c = VX.map.get(k);
+    if (c === undefined) { if (VX.map.size < VX.max) VX.map.set(k, 1); } else if (c < 250) VX.map.set(k, c + 1);
+  }
+}
+// walls / floor / ceiling / door + window frames from the room setup = structure, never part of an object
+const STRUCT = new Set(['wall', 'floor', 'ceiling', 'door frame', 'window frame', 'wall art', 'vertical', 'invisible wall face']);
+function planeBox(s) {
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (const p of s.poly) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); z0 = Math.min(z0, p.z); z1 = Math.max(z1, p.z); }
+  return { inv: s.group.matrixWorld.clone().invert(), x0, x1, z0, z1 };
+}
+function refreshStructs() {
+  if (VX.structsAt === planes.size) return; VX.structsAt = planes.size; VX.structs = []; VX.tables = [];
+  for (const s of planes.values()) {
+    if (s.label === 'table') { VX.tables.push(planeBox(s)); continue; }
+    if (!STRUCT.has(s.label)) continue;
+    let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    for (const p of s.poly) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); z0 = Math.min(z0, p.z); z1 = Math.max(z1, p.z); }
+    VX.structs.push({ inv: s.group.matrixWorld.clone().invert(), x0: x0 - 0.1, x1: x1 + 0.1, z0: z0 - 0.1, z1: z1 + 0.1 });
+  }
+}
+const _sv = new THREE.Vector3();
+function isStruct(x, y, z) {
+  if (y < 0.05) return true;
+  for (const s of VX.structs) {
+    _sv.set(x, y, z).applyMatrix4(s.inv);   // plane space: y = distance from the plane
+    if (Math.abs(_sv.y) < 0.055 && _sv.x > s.x0 && _sv.x < s.x1 && _sv.z > s.z0 && _sv.z < s.z1) return true;
+  }
+  return false;
+}
+const NB7 = [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+const NB2 = []; for (let a = -2; a <= 2; a++) for (let b = -2; b <= 2; b++) for (let c = -2; c <= 2; c++) if ((a || b || c) && a * a + b * b + c * c <= 5) NB2.push([a, b, c]);
+function voxRay(o, d) {
+  if (VX.map.size < 200) return null;
+  for (let t = 0.25; t < 6; t += VX.S * 0.5) {
+    const x = o.x + d.x * t, y = o.y + d.y * t, z = o.z + d.z * t;
+    const ix = Math.floor(x / VX.S), iy = Math.floor(y / VX.S), iz = Math.floor(z / VX.S);
+    for (const [a, b, c2] of NB7) { const k = vk(ix + a, iy + b, iz + c2); if (VX.map.get(k) >= 2) return { kind: 'vox', key: k, p: new THREE.Vector3(x, y, z) }; }
+  }
+  return null;
+}
+// flood the connected blocks from the pointed one. Pointing at a wall itself = a 0.5 m piece of that wall.
+function voxObject(seedKey, seedP) {
+  refreshStructs();
+  const [sx, sy, sz] = vkDecode(seedKey), S = VX.S;
+  const wall = isStruct((sx + 0.5) * S, (sy + 0.5) * S, (sz + 0.5) * S);
+  const maxR = wall ? 0.5 : 2.2, maxN = 7000;
+  const cuts = [];   // seed sits on a table -> nothing at/below that table top inside its footprint
+  for (const t of VX.tables || []) { _sv.copy(seedP).applyMatrix4(t.inv); if (_sv.y > 0.04 && _sv.x > t.x0 && _sv.x < t.x1 && _sv.z > t.z0 && _sv.z < t.z1) cuts.push(t); }
+  const cut = (x, y, z) => { for (const t of cuts) { _sv.set(x, y, z).applyMatrix4(t.inv); if (_sv.y < 0.02 && _sv.x > t.x0 - 0.03 && _sv.x < t.x1 + 0.03 && _sv.z > t.z0 - 0.03 && _sv.z < t.z1 + 0.03) return true; } return false; };
+  const out = new Set([seedKey]), q = [seedKey];
+  while (q.length && out.size < maxN) {
+    const [ix, iy, iz] = vkDecode(q.pop());
+    for (const [dx, dy, dz] of NB2) {
+      const k = vk(ix + dx, iy + dy, iz + dz); if (out.has(k)) continue;
+      const c = VX.map.get(k); if (!(c >= 2)) continue;
+      const x = (ix + dx + 0.5) * S, y = (iy + dy + 0.5) * S, z = (iz + dz + 0.5) * S;
+      if ((x - seedP.x) ** 2 + (y - seedP.y) ** 2 + (z - seedP.z) ** 2 > maxR * maxR) continue;
+      if (!wall && (isStruct(x, y, z) || cut(x, y, z))) continue;
+      if (wall && !isStruct(x, y, z)) continue;
+      out.add(k); q.push(k);
+    }
+  }
+  return out;
+}
+// blocks -> fragment object: each block is a little cube that moves as one piece (same shader as the triangle shards)
+function makeVoxFrag(keys, meta) {
+  let list = [...keys], S = VX.S;
+  if (list.length > 2600) {   // too many: merge into 6 cm blocks
+    const big = new Set(); for (const k of list) { const [x, y, z] = vkDecode(k); big.add(vk(x >> 1, y >> 1, z >> 1)); }
+    list = [...big]; S *= 2;
+  }
+  const n = list.length, V = n * 36;
+  const A = k => new Float32Array(V * k);
+  const pos = A(3), off = A(3), cen = A(3), vel = A(3), axis = A(3), ball = A(3), bary = A(3), spin = A(1), rnd = A(1);
+  const center = new THREE.Vector3(); let rad = 0;
+  const cs = list.map(k => { const [x, y, z] = vkDecode(k); return new THREE.Vector3((x + 0.5) * S, (y + 0.5) * S, (z + 0.5) * S); });
+  cs.forEach(c => center.add(c)); center.divideScalar(Math.max(1, n));
+  cs.forEach(c => rad = Math.max(rad, c.distanceTo(center)));
+  const cube = new THREE.BoxGeometry(S * 1.15, S * 1.15, S * 1.15).toNonIndexed().attributes.position.array;
+  const BR = THREE.MathUtils.clamp(0.05 + Math.cbrt(n) * 0.011, 0.07, 0.22);
+  const v = new THREE.Vector3(), q = new THREE.Vector3();
+  cs.forEach((c, i) => {
+    v.copy(c).sub(center); v.y += v.length() * 0.35 + 0.04; v.normalize().add(q.randomDirection().multiplyScalar(0.5)).normalize().multiplyScalar(rand(0.25, 1.3));
+    const ax = q.randomDirection().clone(), sp = rand(-3.5, 3.5), r = Math.random(), b = new THREE.Vector3().randomDirection().multiplyScalar(BR * Math.cbrt(Math.random()));
+    for (let k = 0; k < 36; k++) {
+      const j = (i * 36 + k) * 3;
+      off.set([cube[k * 3], cube[k * 3 + 1], cube[k * 3 + 2]], j);
+      pos.set([c.x + cube[k * 3], c.y + cube[k * 3 + 1], c.z + cube[k * 3 + 2]], j);
+      cen.set([c.x, c.y, c.z], j); vel.set([v.x, v.y, v.z], j); axis.set([ax.x, ax.y, ax.z], j); ball.set([b.x, b.y, b.z], j);
+      bary.set(k % 3 === 0 ? [1, 0, 0] : k % 3 === 1 ? [0, 1, 0] : [0, 0, 1], j); spin[i * 36 + k] = sp; rnd[i * 36 + k] = r;
+    }
+  });
+  const g = new THREE.BufferGeometry();
+  for (const [name, arr, sz] of [['position', pos, 3], ['aOff', off, 3], ['aCen', cen, 3], ['aVel', vel, 3], ['aAxis', axis, 3], ['aBall', ball, 3], ['aBary', bary, 3], ['aSpin', spin, 1], ['aRand', rnd, 1]])
+    g.setAttribute(name, new THREE.BufferAttribute(arr, sz));
+  const u = { uT: { value: 0 }, uCrush: { value: 0 }, uDust: { value: 0 }, uExp: { value: 0 }, uLock: { value: 0 }, uTime: { value: 0 },
+    uBallSpin: { value: 0 }, uBallC: { value: center.clone().add(new THREE.Vector3(0, 0.06, 0)) } };
+  const mesh = new THREE.Mesh(g, new THREE.ShaderMaterial({ uniforms: u, vertexShader: fragVS, fragmentShader: fragFS, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
+  mesh.frustumCulled = false; mesh.renderOrder = 5; scene.add(mesh);
+  const f = { mesh, u, center, rad, n, state: 'hover', lock: 0, crushTarget: 0, dustT: -1, tExp: 0, keys, voxObj: true, ...meta };
+  frags.push(f); return f;
+}
+
 // ---------------------------------------------------------------- interaction state
 const st = { started: false, hover: null, hoverT: 0, locked: null, lockT: 0, lastAim: 0, lastBuild: 0, aim: null, capTried: false, needPinch: false, noCapture: false };
 const ray = new THREE.Raycaster();
 function aimHit(o, d) {
+  { const vh = voxRay(o, d); if (vh) return vh; }   // the fused 3D model first (whole objects)
   if (DEP.ok && performance.now() - DEP.at < 600) { const dh = depthRay(o, d); if (dh) return dh; }   // live depth first
   ray.set(o, d); ray.far = 7;
   const ph = ray.intersectObjects(planeHits, false).find(x => !x.object.userData.src.gone);
@@ -682,6 +803,7 @@ function aimHit(o, d) {
   return null;
 }
 function targetFor(h) {
+  if (h.kind === 'vox') { const keys = voxObject(h.key, h.p); st.lastObjN = keys.size; return keys.size >= 4 ? makeVoxFrag(keys, { anchor: h.p.clone() }) : null; }
   if (h.kind === 'depth') { const arr = depthObject(h); return arr.length >= 27 ? makeFrag(arr, { anchor: h.p.clone(), depthObj: true }) : null; }
   if (h.kind === 'mesh') {
     const ids = chunkAt(h.m, h.p); if (ids.length < 3) return null;
@@ -736,8 +858,8 @@ function updateInteraction(dt, now) {
   // hover: light up the REAL shape you're pointing at; hold 0.4 s to lock
   if (hit) {
     const h = st.hover;
-    const same = h && !h.fading && h.state === 'hover' && ((hit.kind === 'depth' && h.depthObj && hit.p.distanceTo(h.anchor) < 0.15) || (hit.kind === 'plane' && h.plane === hit.s) || (hit.kind === 'mesh' && h.m === hit.m && hit.p.distanceTo(h.anchor) < 0.3));
-    const onLocked = st.locked && st.locked.state === 'locked' && ((hit.kind === 'depth' && st.locked.depthObj && hit.p.distanceTo(st.locked.anchor) < 0.2) || (hit.kind === 'plane' && st.locked.plane === hit.s) || (hit.kind === 'mesh' && st.locked.m === hit.m && hit.p.distanceTo(st.locked.anchor) < 0.3));
+    const same = h && !h.fading && h.state === 'hover' && ((hit.kind === 'vox' && h.voxObj && h.keys.has(hit.key)) || (hit.kind === 'depth' && h.depthObj && hit.p.distanceTo(h.anchor) < 0.15) || (hit.kind === 'plane' && h.plane === hit.s) || (hit.kind === 'mesh' && h.m === hit.m && hit.p.distanceTo(h.anchor) < 0.3));
+    const onLocked = st.locked && st.locked.state === 'locked' && ((hit.kind === 'vox' && st.locked.voxObj && st.locked.keys.has(hit.key)) || (hit.kind === 'depth' && st.locked.depthObj && hit.p.distanceTo(st.locked.anchor) < 0.2) || (hit.kind === 'plane' && st.locked.plane === hit.s) || (hit.kind === 'mesh' && st.locked.m === hit.m && hit.p.distanceTo(st.locked.anchor) < 0.3));
     if (onLocked) { st.lockT = now; }
     else if (same) st.hoverT += dt;
     else if (now - st.lastBuild > 160) {
@@ -765,7 +887,7 @@ function updateInteraction(dt, now) {
     else t = 'POINT AT SOMETHING';
   }
   setHint(t, (PREVIEW || now - st.t0 < 15000 || !DEP.ok) ? DEP.status : '');
-  if (!PREVIEW && now - (st.diagT || 0) > 1500) { st.diagT = now; diag({ status: DEP.status, mode: DEP.mode, info: DEP.info, aim: st.aim ? st.aim.kind : null, meshes: meshes.size, planes: planes.size }); }   // stays up while depth isn't working
+  if (!PREVIEW && now - (st.diagT || 0) > 1500) { st.diagT = now; diag({ status: DEP.status, mode: DEP.mode, info: DEP.info, aim: st.aim ? st.aim.kind : null, vox: VX.map.size, obj: st.lastObjN || 0, meshes: meshes.size, planes: planes.size }); }   // stays up while depth isn't working
 }
 
 // ---------------------------------------------------------------- main loop
@@ -790,7 +912,7 @@ function loop(time, frame) {
         const mp = frame.getPose(me.meshSpace, ref); if (mp) upsertMesh(key, me, me.semanticLabel || 'other', mp.transform.matrix, me.lastChangedTime);
       }
     }
-    if (pose && st.wantDepth && now - DEP.at > 140 && now - (DEP.tried || 0) > 140) { DEP.tried = now; depthRead(frame, pose); }
+    if (pose && st.started && now - DEP.at > (st.wantDepth ? 140 : 250) && now - (DEP.tried || 0) > 140) { DEP.tried = now; depthRead(frame, pose); }
     hands.left.has = hands.right.has = false; hands.left.rayOK = hands.right.rayOK = false; st.ctrl = false;
     for (const src of frame.session.inputSources) {
       if (src.hand) {
@@ -822,6 +944,7 @@ function step(dt, now) {
   hint.m.position.copy(head.pos).addScaledVector(head.fwd, 0.9).addScaledVector(tA.set(0, 1, 0).applyQuaternion(head.quat), -0.28);
   hint.m.quaternion.copy(head.quat);
   if (aimLine.material.opacity > 0 || frags.length) st.idleT = now;
+  if (PREVIEW) document.title = 'vox=' + VX.map.size + ' aim=' + (st.aim ? st.aim.kind : '-') + ' obj=' + (st.lastObjN || 0) + ' frags=' + frags.map(f => f.voxObj ? 'V' : 'T').join('');
   else if (now - st.idleT > 60000 && counts.explode > 0) { st.idleT = now; say('idle'); }
 }
 renderer.setAnimationLoop(loop);
@@ -868,7 +991,7 @@ function fakeDepth() {
 }
 function demo() {
   if (Q.has('depthtest')) depthSelfTest();
-  demoT = 0; step(0, performance.now()); fakeDepth();
+  demoT = 0; step(0, performance.now()); fakeDepth(); fuseDepth(); fuseDepth();
   const T = parseFloat(Q.get('t') || '0'); let fake = performance.now();
   for (let i = 0; i < T * 60; i++) { fake += 1000 / 60; step(1 / 60, fake); }
   lastT = performance.now();
