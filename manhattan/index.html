@@ -29,7 +29,7 @@
   <button id="go">BECOME</button>
   <div id="msg">Hands only. Point at something · open your hand · make a fist · open again</div>
   <a id="other" href="../">← J.A.R.V.I.S.</a>
-  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fc4ff;opacity:.8">VERSION 7 · LIVE 3D MODEL</div>
+  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fc4ff;opacity:.8">VERSION 8 · LIVE 3D MODEL</div>
 </div>
 <script type="module">
 import * as THREE from '../vendor/three.module.js';
@@ -681,7 +681,10 @@ function fuseDepth() {
   const p = new THREE.Vector3(), hp = [];
   for (const side of ['left', 'right']) { const h = hands[side]; if (h.has) hp.push(h.J[0], h.J[JI['middle-finger-phalanx-proximal']], h.J[JI['index-finger-tip']]); }
   for (let j = 0; j < DEP.H; j++) for (let i = 0; i < DEP.W; i++) {   // every pixel: a denser model
-    if (!(DEP.D[j * DEP.W + i] > 0) || DEP.D[j * DEP.W + i] * DEP.toM > 4.5) continue;
+    const k0 = j * DEP.W + i, d0 = DEP.D[k0];
+    if (!(d0 > 0) || d0 * DEP.toM > 4.5 || i === 0 || j === 0 || i === DEP.W - 1 || j === DEP.H - 1) continue;
+    const dl = DEP.D[k0 - 1], dr = DEP.D[k0 + 1], du = DEP.D[k0 - DEP.W], dd = DEP.D[k0 + DEP.W], tol = d0 * 0.06;
+    if (Math.abs(dl - d0) > tol || Math.abs(dr - d0) > tol || Math.abs(du - d0) > tol || Math.abs(dd - d0) > tol) continue;   // flying pixel at an edge
     if (!depthWorld(i, j, p) || p.y < 0.03 || p.y > 2.6) continue;
     let nearHand = false; for (const q of hp) if (p.distanceToSquared(q) < 0.15 * 0.15) { nearHand = true; break; }
     if (nearHand) continue;                                    // don't model your own hands
@@ -708,21 +711,22 @@ function refreshStructs() {
 }
 const _sv = new THREE.Vector3();
 function isStruct(x, y, z) {
-  if (y < 0.05) return true;
+  if (y < 0.06) return true;
   for (const s of VX.structs) {
     _sv.set(x, y, z).applyMatrix4(s.inv);   // plane space: y = distance from the plane
-    if (Math.abs(_sv.y) < 0.055 && _sv.x > s.x0 && _sv.x < s.x1 && _sv.z > s.z0 && _sv.z < s.z1) return true;
+    if (Math.abs(_sv.y) < 0.09 && _sv.x > s.x0 && _sv.x < s.x1 && _sv.z > s.z0 && _sv.z < s.z1) return true;
   }
   return false;
 }
 const NB7 = [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
 const NB2 = []; for (let a = -2; a <= 2; a++) for (let b = -2; b <= 2; b++) for (let c = -2; c <= 2; c++) if ((a || b || c) && a * a + b * b + c * c <= 5) NB2.push([a, b, c]);
+const NB26 = []; for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) if (a || b || c) NB26.push([a, b, c]);
 function voxRay(o, d) {
   if (VX.map.size < 200) return null;
   for (let t = 0.25; t < 6; t += VX.S * 0.5) {
     const x = o.x + d.x * t, y = o.y + d.y * t, z = o.z + d.z * t;
     const ix = Math.floor(x / VX.S), iy = Math.floor(y / VX.S), iz = Math.floor(z / VX.S);
-    for (const [a, b, c2] of NB7) { const k = vk(ix + a, iy + b, iz + c2); if (VX.map.get(k) >= 2) return { kind: 'vox', key: k, p: new THREE.Vector3(x, y, z) }; }
+    for (const [a, b, c2] of NB7) { const k = vk(ix + a, iy + b, iz + c2); if (VX.map.get(k) >= 3) return { kind: 'vox', key: k, p: new THREE.Vector3(x, y, z) }; }
   }
   return null;
 }
@@ -731,16 +735,16 @@ function voxObject(seedKey, seedP) {
   refreshStructs();
   const [sx, sy, sz] = vkDecode(seedKey), S = VX.S;
   const wall = isStruct((sx + 0.5) * S, (sy + 0.5) * S, (sz + 0.5) * S);
-  const maxR = wall ? 0.5 : 2.2, maxN = 7000;
+  const maxR = wall ? 0.5 : 1.5, maxN = 6000;
   const cuts = [];   // seed sits on a table -> nothing at/below that table top inside its footprint
   for (const t of VX.tables || []) { _sv.copy(seedP).applyMatrix4(t.inv); if (_sv.y > 0.04 && _sv.x > t.x0 && _sv.x < t.x1 && _sv.z > t.z0 && _sv.z < t.z1) cuts.push(t); }
   const cut = (x, y, z) => { for (const t of cuts) { _sv.set(x, y, z).applyMatrix4(t.inv); if (_sv.y < 0.02 && _sv.x > t.x0 - 0.03 && _sv.x < t.x1 + 0.03 && _sv.z > t.z0 - 0.03 && _sv.z < t.z1 + 0.03) return true; } return false; };
   const out = new Set([seedKey]), q = [seedKey];
   while (q.length && out.size < maxN) {
     const [ix, iy, iz] = vkDecode(q.pop());
-    for (const [dx, dy, dz] of NB2) {
+    for (const [dx, dy, dz] of NB26) {
       const k = vk(ix + dx, iy + dy, iz + dz); if (out.has(k)) continue;
-      const c = VX.map.get(k); if (!(c >= 2)) continue;
+      const c = VX.map.get(k); if (!(c >= 3)) continue;
       const x = (ix + dx + 0.5) * S, y = (iy + dy + 0.5) * S, z = (iz + dz + 0.5) * S;
       if ((x - seedP.x) ** 2 + (y - seedP.y) ** 2 + (z - seedP.z) ** 2 > maxR * maxR) continue;
       if (!wall && (isStruct(x, y, z) || cut(x, y, z))) continue;
@@ -991,7 +995,7 @@ function fakeDepth() {
 }
 function demo() {
   if (Q.has('depthtest')) depthSelfTest();
-  demoT = 0; step(0, performance.now()); fakeDepth(); fuseDepth(); fuseDepth();
+  demoT = 0; step(0, performance.now()); fakeDepth(); fuseDepth(); fuseDepth(); fuseDepth();
   const T = parseFloat(Q.get('t') || '0'); let fake = performance.now();
   for (let i = 0; i < T * 60; i++) { fake += 1000 / 60; step(1 / 60, fake); }
   lastT = performance.now();
