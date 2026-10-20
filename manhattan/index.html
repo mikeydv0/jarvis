@@ -157,193 +157,272 @@ function radialTex(stops) {
 const glowTex = radialTex([[0, 'rgba(255,255,255,1)'], [0.25, 'rgba(160,215,255,0.8)'], [0.6, 'rgba(60,140,255,0.25)'], [1, 'rgba(20,80,255,0)']]);
 const softTex = radialTex([[0, 'rgba(200,230,255,0.9)'], [0.5, 'rgba(90,160,255,0.3)'], [1, 'rgba(40,100,255,0)']]);
 
-// ---------------------------------------------------------------- room surfaces (XR planes + meshes, or a fake room in preview)
-const surfaces = new Map();
-let targets = [];
-const NICE = { 'wall': 'WALL', 'floor': 'FLOOR', 'ceiling': 'CEILING', 'table': 'TABLE', 'couch': 'COUCH', 'door': 'DOOR', 'door frame': 'DOOR',
-  'window': 'WINDOW', 'window frame': 'WINDOW', 'bed': 'BED', 'screen': 'SCREEN', 'lamp': 'LAMP', 'plant': 'PLANT', 'storage': 'STORAGE',
-  'shelf': 'SHELF', 'other': 'OBJECT', 'horizontal': 'SURFACE', 'vertical': 'WALL' };
+// ---------------------------------------------------------------- room data
+// planes + small meshes = Raycaster on invisible hit meshes; the room's global mesh (everything the Quest scanned)
+// = world-space triangles in a 0.2 m grid, so pointing at ANY scanned thing is cheap to test.
+const planes = new Map(); // key -> { key, group, hit, label, ver, built, poly }
+let planeHits = [];
 const invisible = new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide });
-function needsBuild(s, ver) { return !s || (ver !== undefined && s.ver !== ver && performance.now() - s.built > 1500 && s.state === 'idle'); }
-function finishSurface(key, s, matrixArray) {
-  s.group.matrix.fromArray(matrixArray); s.group.matrixWorldNeedsUpdate = true; s.group.updateMatrixWorld(true);
-  s.center.copy(s.localCenter).applyMatrix4(s.group.matrixWorld);
-  s.group.matrixWorld.decompose(tA, s.quat, tB);
-}
-function rebuildTargets() {
-  targets = [];
-  for (const s of surfaces.values()) if (!s.heavy && s.label !== 'floor' && s.label !== 'ceiling') targets.push(s.hit);
-}
-function makeSurface(key, old, hitGeo, lineGeo, label, localBox, ver, heavy) {
-  if (old) { scene.remove(old.group); old.hit.geometry.dispose(); old.line.geometry.dispose(); }
-  const hit = new THREE.Mesh(hitGeo, invisible);
-  const line = new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({ color: 0x6fc0ff, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }));
-  const group = new THREE.Group(); group.matrixAutoUpdate = false; group.add(hit, line); scene.add(group);
-  if (heavy) line.visible = false;
-  const s = { key, group, hit, line, label, localBox, localCenter: localBox.getCenter(new THREE.Vector3()), center: new THREE.Vector3(),
-    quat: new THREE.Quaternion(), size: localBox.getSize(new THREE.Vector3()), ver, heavy, built: performance.now(),
-    state: old ? old.state : 'idle', glow: 0, hover: 0 };
-  hit.userData.surface = s;
-  surfaces.set(key, s); rebuildTargets();
-  return s;
-}
+const NOT_TARGET = new Set(['floor', 'ceiling']);
+function canRebuild(s, ver) { return !s || (ver !== undefined && s.ver !== ver && performance.now() - s.built > 3000); }
+function rebuildPlaneHits() { planeHits = []; for (const s of planes.values()) if (!NOT_TARGET.has(s.label)) planeHits.push(s.hit); }
 function upsertPlane(key, src, label, matrixArray, ver = 0) {
-  let s = surfaces.get(key);
-  if (needsBuild(s, ver)) {
+  let s = planes.get(key);
+  if (canRebuild(s, ver)) {
     const poly = Array.isArray(src) ? src : src.polygon;
-    const shape = new THREE.Shape(poly.map(p => new THREE.Vector2(p.x, -p.z)));
-    const geo = new THREE.ShapeGeometry(shape); geo.rotateX(-Math.PI / 2);
-    const pts = []; poly.forEach((p, i) => { const q = poly[(i + 1) % poly.length]; pts.push(new THREE.Vector3(p.x, 0.004, p.z), new THREE.Vector3(q.x, 0.004, q.z)); });
-    const box = new THREE.Box3(); poly.forEach(p => box.expandByPoint(tA.set(p.x, 0, p.z)));
-    const th = (label === 'wall' || label === 'vertical' || label === 'door frame' || label === 'window frame') ? 0.06 : 0.04;
-    box.min.y = -th; box.max.y = label === 'table' ? 0.02 : th * 0.3; // pieces come out of the slab
-    s = makeSurface(key, s, geo, new THREE.BufferGeometry().setFromPoints(pts), label, box, ver, false);
+    const geo = new THREE.ShapeGeometry(new THREE.Shape(poly.map(p => new THREE.Vector2(p.x, -p.z)))); geo.rotateX(-Math.PI / 2);
+    if (s) { scene.remove(s.group); s.hit.geometry.dispose(); }
+    const hit = new THREE.Mesh(geo, invisible), group = new THREE.Group(); group.matrixAutoUpdate = false; group.add(hit); scene.add(group);
+    s = { key, group, hit, label, ver, built: performance.now(), poly: poly.map(p => ({ x: p.x, z: p.z })), kind: 'plane' };
+    hit.userData.src = s; planes.set(key, s); rebuildPlaneHits();
   }
-  finishSurface(key, s, matrixArray);
+  s.group.matrix.fromArray(matrixArray); s.group.matrixWorldNeedsUpdate = true; s.group.updateMatrixWorld(true);
 }
+const CS = 0.2;
+const cellKey = (x, y, z) => ((Math.floor(x / CS) + 512) * 1024 + (Math.floor(y / CS) + 512)) * 1024 + (Math.floor(z / CS) + 512);
+const meshes = new Map(); // key -> accel { P(world xyz), T, N(normals), cells, stamp, gone, ver, built, label }
+let stampId = 0;
 function upsertMesh(key, src, label, matrixArray, ver = 0) {
-  let s = surfaces.get(key);
-  if (needsBuild(s, ver)) {
-    const v = src.vertices, idx = src.indices;
-    const heavy = label === 'global mesh' || idx.length / 3 > 3000;
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(v), 3));
-    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(idx), 1));
-    geo.computeBoundingBox();
-    s = makeSurface(key, s, geo, heavy ? new THREE.BufferGeometry() : new THREE.EdgesGeometry(geo, 30), label, geo.boundingBox.clone(), ver, heavy);
+  const old = meshes.get(key);
+  if (!canRebuild(old, ver)) return;
+  const v = src.vertices, idx = src.indices, e = matrixArray;
+  const P = new Float32Array(idx.length * 3); // de-indexed world triangles
+  for (let i = 0; i < idx.length; i++) {
+    const j = idx[i] * 3, x = v[j], y = v[j + 1], z = v[j + 2];
+    P[i * 3] = e[0] * x + e[4] * y + e[8] * z + e[12]; P[i * 3 + 1] = e[1] * x + e[5] * y + e[9] * z + e[13]; P[i * 3 + 2] = e[2] * x + e[6] * y + e[10] * z + e[14];
   }
-  finishSurface(key, s, matrixArray);
+  const T = idx.length / 3, N = new Float32Array(T * 3), cells = new Map();
+  for (let t = 0; t < T; t++) {
+    const o = t * 9;
+    const ax = P[o + 3] - P[o], ay = P[o + 4] - P[o + 1], az = P[o + 5] - P[o + 2], bx = P[o + 6] - P[o], by = P[o + 7] - P[o + 1], bz = P[o + 8] - P[o + 2];
+    let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx; const l = Math.hypot(nx, ny, nz) || 1;
+    N[t * 3] = nx / l; N[t * 3 + 1] = ny / l; N[t * 3 + 2] = nz / l;
+    const x0 = Math.min(P[o], P[o + 3], P[o + 6]), x1 = Math.max(P[o], P[o + 3], P[o + 6]);
+    const y0 = Math.min(P[o + 1], P[o + 4], P[o + 7]), y1 = Math.max(P[o + 1], P[o + 4], P[o + 7]);
+    const z0 = Math.min(P[o + 2], P[o + 5], P[o + 8]), z1 = Math.max(P[o + 2], P[o + 5], P[o + 8]);
+    for (let cx = Math.floor(x0 / CS); cx <= Math.floor(x1 / CS); cx++)
+      for (let cy = Math.floor(y0 / CS); cy <= Math.floor(y1 / CS); cy++)
+        for (let cz = Math.floor(z0 / CS); cz <= Math.floor(z1 / CS); cz++) {
+          const k = ((cx + 512) * 1024 + (cy + 512)) * 1024 + (cz + 512);
+          let a = cells.get(k); if (!a) cells.set(k, a = []); a.push(t);
+        }
+  }
+  meshes.set(key, { key, P, T, N, cells, stamp: new Int32Array(T), gone: old && old.T === T ? old.gone : new Uint8Array(T), ver, built: performance.now(), label, kind: 'mesh' });
+}
+function triHit(m, t, o, d) { // Moller-Trumbore, returns distance or -1
+  const P = m.P, i = t * 9;
+  const e1x = P[i + 3] - P[i], e1y = P[i + 4] - P[i + 1], e1z = P[i + 5] - P[i + 2], e2x = P[i + 6] - P[i], e2y = P[i + 7] - P[i + 1], e2z = P[i + 8] - P[i + 2];
+  const px = d.y * e2z - d.z * e2y, py = d.z * e2x - d.x * e2z, pz = d.x * e2y - d.y * e2x, det = e1x * px + e1y * py + e1z * pz;
+  if (Math.abs(det) < 1e-9) return -1;
+  const inv = 1 / det, sx = o.x - P[i], sy = o.y - P[i + 1], sz = o.z - P[i + 2], u = (sx * px + sy * py + sz * pz) * inv;
+  if (u < 0 || u > 1) return -1;
+  const qx = sy * e1z - sz * e1y, qy = sz * e1x - sx * e1z, qz = sx * e1y - sy * e1x, w = (d.x * qx + d.y * qy + d.z * qz) * inv;
+  if (w < 0 || u + w > 1) return -1;
+  const tt = (e2x * qx + e2y * qy + e2z * qz) * inv; return tt > 0.02 ? tt : -1;
+}
+function isFloorOrCeil(m, t) {
+  const ny = m.N[t * 3 + 1], y = (m.P[t * 9 + 1] + m.P[t * 9 + 4] + m.P[t * 9 + 7]) / 3;
+  return (Math.abs(ny) > 0.85 && y < 0.06) || (Math.abs(ny) > 0.85 && y > 2.0);
+}
+function rayMeshes(o, d, maxT = 7) {
+  let best = { t: Infinity, m: null, tri: -1 };
+  for (const m of meshes.values()) {
+    stampId++;
+    for (let t = 0; t < maxT && t < best.t + CS; t += CS * 0.35) {
+      const list = m.cells.get(cellKey(o.x + d.x * t, o.y + d.y * t, o.z + d.z * t)); if (!list) continue;
+      for (const tri of list) {
+        if (m.stamp[tri] === stampId) continue; m.stamp[tri] = stampId;
+        if (m.gone[tri]) continue;
+        const h = triHit(m, tri, o, d); if (h > 0 && h < best.t) best = { t: h, m, tri };
+      }
+    }
+  }
+  return best.m ? best : null;
+}
+// the "object" around a pointed-at spot of the room mesh: triangles within R, minus floor/ceiling
+function chunkAt(m, p, R = 0.42) {
+  const ids = [], seen = new Set(), r = Math.ceil(R / CS);
+  const c0x = Math.floor(p.x / CS), c0y = Math.floor(p.y / CS), c0z = Math.floor(p.z / CS);
+  for (let x = -r; x <= r; x++) for (let y = -r; y <= r; y++) for (let z = -r; z <= r; z++) {
+    const list = m.cells.get(((c0x + x + 512) * 1024 + (c0y + y + 512)) * 1024 + (c0z + z + 512)); if (!list) continue;
+    for (const t of list) {
+      if (seen.has(t) || m.gone[t]) continue; seen.add(t);
+      const i = t * 9, cx = (m.P[i] + m.P[i + 3] + m.P[i + 6]) / 3, cy = (m.P[i + 1] + m.P[i + 4] + m.P[i + 7]) / 3, cz = (m.P[i + 2] + m.P[i + 5] + m.P[i + 8]) / 3;
+      if ((cx - p.x) ** 2 + (cy - p.y) ** 2 + (cz - p.z) ** 2 > R * R || isFloorOrCeil(m, t)) continue;
+      ids.push(t);
+    }
+  }
+  return ids;
+}
+function planeTris(s) { // grid over the plane's rectangle, ~9 cm cells, in world space
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (const p of s.poly) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); z0 = Math.min(z0, p.z); z1 = Math.max(z1, p.z); }
+  const nx = Math.max(1, Math.min(36, Math.round((x1 - x0) / 0.09))), nz = Math.max(1, Math.min(36, Math.round((z1 - z0) / 0.09)));
+  const out = [], mw = s.group.matrixWorld, v = new THREE.Vector3();
+  const W = (x, z) => { v.set(x, 0.005, z).applyMatrix4(mw); out.push(v.x, v.y, v.z); };
+  for (let i = 0; i < nx; i++) for (let j = 0; j < nz; j++) {
+    const a = x0 + (x1 - x0) * i / nx, b = x0 + (x1 - x0) * (i + 1) / nx, c = z0 + (z1 - z0) * j / nz, d = z0 + (z1 - z0) * (j + 1) / nz;
+    W(a, c); W(b, c); W(b, d); W(a, c); W(b, d); W(a, d);
+  }
+  return new Float32Array(out);
 }
 function buildFakeRoom() {
-  const m = new THREE.Matrix4();
   const rect = (w, d) => [{ x: -w / 2, z: -d / 2 }, { x: w / 2, z: -d / 2 }, { x: w / 2, z: d / 2 }, { x: -w / 2, z: d / 2 }];
-  upsertPlane('floor', rect(4.2, 3.8), 'floor', m.identity().toArray());
+  upsertPlane('floor', rect(4.2, 3.8), 'floor', new THREE.Matrix4().toArray());
   const wall = (x, z, ry) => new THREE.Matrix4().makeTranslation(x, 1.25, z).multiply(new THREE.Matrix4().makeRotationY(ry)).multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2)).toArray();
   upsertPlane('w1', rect(4.2, 2.5), 'wall', wall(0, -1.9, 0));
   upsertPlane('w2', rect(3.8, 2.5), 'wall', wall(-2.1, 0, Math.PI / 2));
-  upsertPlane('table', rect(1.2, 0.7), 'table', new THREE.Matrix4().makeTranslation(0.1, 0.74, -1.0).toArray());
-  // a "couch" volume as a mesh
-  const bx = new THREE.BoxGeometry(1.8, 0.8, 0.8); bx.translate(0, 0.4, 0);
-  upsertMesh('couch', { vertices: bx.attributes.position.array, indices: bx.index.array }, 'couch', new THREE.Matrix4().makeTranslation(-1.3, 0, -1.3).toArray());
+  // a fake "global mesh": desk + monitor + chair, finely tessellated like a real room scan
+  const parts = [];
+  const add = (g, x, y, z) => { g.translate(x, y, z); parts.push(g.toNonIndexed()); };
+  add(new THREE.BoxGeometry(1.4, 0.05, 0.7, 14, 1, 7), 0.2, 0.74, -1.3);
+  add(new THREE.BoxGeometry(0.06, 0.72, 0.6, 1, 7, 6), -0.45, 0.36, -1.3); add(new THREE.BoxGeometry(0.06, 0.72, 0.6, 1, 7, 6), 0.85, 0.36, -1.3);
+  add(new THREE.BoxGeometry(0.62, 0.38, 0.05, 8, 5, 1), 0.2, 1.0, -1.5);
+  add(new THREE.BoxGeometry(0.5, 0.08, 0.5, 6, 1, 6), -0.9, 0.48, -0.7); add(new THREE.BoxGeometry(0.5, 0.6, 0.07, 6, 7, 1), -0.9, 0.82, -0.93);
+  add(new THREE.CylinderGeometry(0.04, 0.04, 0.45, 8, 4), -0.9, 0.22, -0.7);
+  const pos = []; parts.forEach(g => pos.push(...g.attributes.position.array));
+  upsertMesh('gm', { vertices: new Float32Array(pos), indices: Uint32Array.from({ length: pos.length / 3 }, (_, i) => i) }, 'global mesh', new THREE.Matrix4().toArray());
 }
 
-// ---------------------------------------------------------------- shards (one InstancedMesh for everything)
-const MAX = 1400;
-const shardGeo = (() => {
-  const g = new THREE.BoxGeometry(1, 1, 1).toNonIndexed();
-  const col = new Float32Array(g.attributes.position.count * 3);
-  for (let f = 0; f < 6; f++) { const k = [1.0, 0.3, 0.7, 0.18, 0.5, 0.85][f]; for (let v = 0; v < 6; v++) col.set([0.18 + k * 0.45, 0.42 + k * 0.5, 0.75 + k * 0.25], (f * 6 + v) * 3); }
-  g.setAttribute('color', new THREE.BufferAttribute(col, 3)); return g;
-})();
-const shardMat = new THREE.MeshBasicMaterial({ vertexColors: true });
-const shards = new THREE.InstancedMesh(shardGeo, shardMat, MAX);
-shards.instanceMatrix.setUsage(THREE.DynamicDrawUsage); shards.frustumCulled = false; shards.count = 0; scene.add(shards);
-const S = []; // {pos, vel, quat, av, scl, base, owner, off, mode, t}
-for (let i = 0; i < MAX; i++) shards.setColorAt(i, new THREE.Color(1, 1, 1));
+// ---------------------------------------------------------------- fragments: a real shape, broken into its own triangles (all motion on the GPU)
+const fragVS = `
+attribute vec3 aOff, aCen, aVel, aAxis, aBall, aBary; attribute float aSpin, aRand;
+uniform float uT, uCrush, uDust, uExp, uBallSpin; uniform vec3 uBallC;
+varying vec3 vBary; varying float vA;
+vec3 rot(vec3 v, vec3 a, float g) { return v * cos(g) + cross(a, v) * sin(g) + a * dot(a, v) * (1.0 - cos(g)); }
+void main() {
+  float d = (1.0 - exp(-1.1 * uT)) / 1.1;                      // floaty slow-motion drift
+  vec3 c = aCen + aVel * d * uExp + vec3(0.0, sin(uT * 0.8 + aRand * 6.3) * 0.015, 0.0) * uExp;
+  vec3 off = rot(aOff, aAxis, aSpin * uT * uExp);
+  float cr = smoothstep(0.0, 1.0, clamp(uCrush * 1.35 - aRand * 0.35, 0.0, 1.0));
+  c = mix(c, uBallC + rot(aBall, vec3(0.0, 1.0, 0.0), uBallSpin), cr);
+  off *= mix(1.0, 0.42, cr);
+  c += normalize(aVel + vec3(1e-4)) * uDust * (0.4 + aRand) * 1.4;
+  off *= max(0.0, 1.0 - uDust * 1.2);
+  vBary = aBary; vA = 1.0 - uDust;
+  gl_Position = projectionMatrix * viewMatrix * vec4(c + off, 1.0);
+}`;
+const fragFS = `
+uniform float uLock, uExp, uTime, uCrush; varying vec3 vBary; varying float vA;
+void main() {
+  float e = min(min(vBary.x, vBary.y), vBary.z), w = fwidth(e);
+  float edge = 1.0 - smoothstep(w * 0.6, w * 1.8, e);
+  vec3 fill = vec3(0.08, 0.30, 0.85), ec = vec3(0.72, 0.92, 1.0);
+  float a;
+  if (uExp < 0.5) a = (edge * 0.85 + 0.10) * uLock * (0.8 + 0.2 * sin(uTime * 9.0));   // outline of the REAL object
+  else a = 0.62 + edge * 0.38 + uCrush * 0.2;
+  gl_FragColor = vec4(mix(fill, ec, edge), a * vA);
+}`;
+const frags = [];
+function subdivide(src, maxEdge, cap) {
+  let tris = []; for (let i = 0; i < src.length; i += 9) tris.push(src.subarray(i, i + 9));
+  const l2 = (a, i, j) => (a[i] - a[j]) ** 2 + (a[i + 1] - a[j + 1]) ** 2 + (a[i + 2] - a[j + 2]) ** 2;
+  let changed = true;
+  while (changed && tris.length < cap) {
+    changed = false; const next = [];
+    for (const t of tris) {
+      const e0 = l2(t, 0, 3), e1 = l2(t, 3, 6), e2 = l2(t, 6, 0), m = Math.max(e0, e1, e2);
+      if (m <= maxEdge * maxEdge || next.length + tris.length > cap) { next.push(t); continue; }
+      changed = true;
+      const [a, b, c] = m === e0 ? [0, 3, 6] : m === e1 ? [3, 6, 0] : [6, 0, 3];
+      const mid = [(t[a] + t[b]) / 2, (t[a + 1] + t[b + 1]) / 2, (t[a + 2] + t[b + 2]) / 2];
+      const A = [t[a], t[a + 1], t[a + 2]], B = [t[b], t[b + 1], t[b + 2]], C = [t[c], t[c + 1], t[c + 2]];
+      next.push(new Float32Array([...A, ...mid, ...C]), new Float32Array([...mid, ...B, ...C]));
+    }
+    tris = next;
+  }
+  return tris;
+}
+function makeFrag(triArr, meta) {
+  const tris = subdivide(triArr, 0.1, 2600), n = tris.length;
+  const center = new THREE.Vector3(); let rad = 0;
+  for (const t of tris) center.x += (t[0] + t[3] + t[6]) / 3, center.y += (t[1] + t[4] + t[7]) / 3, center.z += (t[2] + t[5] + t[8]) / 3;
+  center.divideScalar(Math.max(1, n));
+  const A = k => new Float32Array(n * 3 * k);
+  const pos = A(3), off = A(3), cen = A(3), vel = A(3), axis = A(3), ball = A(3), bary = A(3), spin = A(1), rnd = A(1);
+  const BR = THREE.MathUtils.clamp(0.05 + Math.cbrt(n) * 0.012, 0.07, 0.2);
+  const v = new THREE.Vector3(), q = new THREE.Vector3();
+  tris.forEach((t, i) => {
+    const cx = (t[0] + t[3] + t[6]) / 3, cy = (t[1] + t[4] + t[7]) / 3, cz = (t[2] + t[5] + t[8]) / 3;
+    rad = Math.max(rad, Math.hypot(cx - center.x, cy - center.y, cz - center.z));
+    v.set(cx - center.x, cy - center.y, cz - center.z); v.y += v.length() * 0.35 + 0.04; v.normalize().add(q.randomDirection().multiplyScalar(0.5)).normalize().multiplyScalar(rand(0.25, 1.25));
+    const ax = q.randomDirection().clone(), sp = rand(-3.5, 3.5), r = Math.random(); const b = new THREE.Vector3().randomDirection().multiplyScalar(BR * Math.cbrt(Math.random()));
+    for (let k = 0; k < 3; k++) {
+      const j = (i * 3 + k) * 3;
+      pos.set([t[k * 3], t[k * 3 + 1], t[k * 3 + 2]], j); off.set([t[k * 3] - cx, t[k * 3 + 1] - cy, t[k * 3 + 2] - cz], j);
+      cen.set([cx, cy, cz], j); vel.set([v.x, v.y, v.z], j); axis.set([ax.x, ax.y, ax.z], j); ball.set([b.x, b.y, b.z], j);
+      bary.set(k === 0 ? [1, 0, 0] : k === 1 ? [0, 1, 0] : [0, 0, 1], j); spin[i * 3 + k] = sp; rnd[i * 3 + k] = r;
+    }
+  });
+  const g = new THREE.BufferGeometry();
+  for (const [name, arr, sz] of [['position', pos, 3], ['aOff', off, 3], ['aCen', cen, 3], ['aVel', vel, 3], ['aAxis', axis, 3], ['aBall', ball, 3], ['aBary', bary, 3], ['aSpin', spin, 1], ['aRand', rnd, 1]])
+    g.setAttribute(name, new THREE.BufferAttribute(arr, sz));
+  const u = { uT: { value: 0 }, uCrush: { value: 0 }, uDust: { value: 0 }, uExp: { value: 0 }, uLock: { value: 0 }, uTime: { value: 0 },
+    uBallSpin: { value: 0 }, uBallC: { value: center.clone().add(new THREE.Vector3(0, 0.06, 0)) } };
+  const mesh = new THREE.Mesh(g, new THREE.ShaderMaterial({ uniforms: u, vertexShader: fragVS, fragmentShader: fragFS, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
+  mesh.frustumCulled = false; mesh.renderOrder = 5; scene.add(mesh);
+  const f = { mesh, u, center, rad, n, state: 'hover', lock: 0, crushTarget: 0, dustT: -1, tExp: 0, ...meta };
+  frags.push(f); return f;
+}
+function disposeFrag(f) {
+  scene.remove(f.mesh); f.mesh.geometry.dispose(); f.mesh.material.dispose();
+  if (f.state !== 'hover' && f.state !== 'locked') { // the real object is "back"
+    if (f.m && f.ids) for (const t of f.ids) f.m.gone[t] = 0;
+    if (f.plane) f.plane.gone = false;
+  }
+  const i = frags.indexOf(f); if (i >= 0) frags.splice(i, 1);
+}
 const flashes = [];
 function flash(pos, size, life = 0.6, tex = glowTex) {
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, color: 0xbfe0ff }));
   sp.position.copy(pos); sp.scale.setScalar(size); scene.add(sp); flashes.push({ sp, t: 0, life, size });
 }
-const shockGeo = new THREE.SphereGeometry(1, 24, 16);
-function shock(pos, size) {
-  const m = new THREE.Mesh(shockGeo, new THREE.MeshBasicMaterial({ color: 0x5fb8ff, wireframe: true, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false }));
-  m.position.copy(pos); m.scale.setScalar(0.05); scene.add(m); flashes.push({ sp: m, t: 0, life: 0.9, size, shock: true });
-}
-function explode(s) {
-  // drop old dead shards first so the buffer never fills up
-  for (let i = S.length - 1; i >= 0; i--) if (S[i].mode === 'dead') S.splice(i, 1);
-  const vol = Math.max(0.02, s.size.x * s.size.z * Math.max(0.15, s.size.y));
-  const area = s.size.x * s.size.z;
-  const want = Math.round(THREE.MathUtils.clamp(60 + area * 70 + vol * 60, 70, 320));
-  const n = Math.min(want, MAX - S.length);
-  const big = Math.max(s.size.x, s.size.y, s.size.z);
-  const mw = s.group.matrixWorld;
-  for (let i = 0; i < n; i++) {
-    const b = s.localBox;
-    const p = new THREE.Vector3(rand(b.min.x, b.max.x), rand(b.min.y, b.max.y), rand(b.min.z, b.max.z)).applyMatrix4(mw);
-    const dir = p.clone().sub(s.center); dir.y += 0.25 * dir.length() + 0.05; dir.normalize();
-    dir.add(new THREE.Vector3().randomDirection().multiplyScalar(0.45)).normalize();
-    const a = THREE.MathUtils.clamp(big * rand(0.04, 0.11), 0.018, 0.16);
-    const scl = new THREE.Vector3(a * rand(0.6, 1.6), a * rand(0.12, 0.5), a * rand(0.5, 1.3));
-    const q = s.quat.clone().multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(rand(-0.5, 0.5), rand(-0.5, 0.5), rand(-0.5, 0.5))));
-    S.push({ pos: p, vel: dir.multiplyScalar(rand(0.35, 1.5) * (0.7 + Math.min(1.5, big) * 0.4)), quat: q,
-      av: new THREE.Vector3(rand(-3, 3), rand(-3, 3), rand(-3, 3)), scl, base: scl.clone(), owner: s, off: new THREE.Vector3(), mode: 'fly', t: 0 });
-  }
-  flash(s.center, big * 1.6 + 0.4, 0.6); flash(s.center, big * 3 + 0.8, 1.1, softTex);
-  boom(big);
-  s.state = 'exploded'; s.tExploded = performance.now();
-  counts.explode++;
+const counts = { explode: 0, crush: 0, release: 0 };
+function explode(f) {
+  f.state = 'exploded'; f.tExp = performance.now(); f.u.uExp.value = 1; f.u.uT.value = 0;
+  if (f.m && f.ids) for (const t of f.ids) f.m.gone[t] = 1;
+  flash(f.center, f.rad * 2.4 + 0.3, 0.55); flash(f.center, f.rad * 4 + 0.6, 1.1, softTex);
+  boom(f.rad * 2); counts.explode++;
   say(counts.explode === 1 ? 'explode_0' : (Math.random() < 0.35 ? (Math.random() < 0.5 ? 'explode_0' : 'explode_1') : ''), counts.explode === 1);
   if (counts.explode === 4) setTimeout(() => say('many', true), 2500);
 }
-function crush(s) {
-  const mine = S.filter(o => o.owner === s && o.mode === 'fly');
-  if (!mine.length) { s.state = 'idle'; return; }
-  const R = THREE.MathUtils.clamp(0.06 + Math.cbrt(mine.length) * 0.014, 0.08, 0.2);
-  s.ball = { center: s.center.clone().add(tA.set(0, 0.05, 0)), quat: new THREE.Quaternion(), R, t: 0 };
-  for (const o of mine) {
-    o.mode = 'crush'; o.t = 0;
-    o.off.randomDirection().multiplyScalar(R * Math.cbrt(Math.random()) * 0.95);
-  }
-  crunch(); flash(s.ball.center, R * 4, 0.5, softTex);
-  s.state = 'crushed'; counts.crush++;
+function crush(f) {
+  f.state = 'crushed'; f.crushTarget = 1;
+  crunch(); flash(f.u.uBallC.value, 0.5, 0.5, softTex); counts.crush++;
   say(counts.crush === 1 ? 'crush_0' : (Math.random() < 0.3 ? 'crush_1' : ''), counts.crush === 1);
 }
-function release(s) {
-  for (const o of S) if (o.owner === s && (o.mode === 'crush' || o.mode === 'fly')) {
-    o.mode = 'dust'; o.t = 0; o.vel.randomDirection().multiplyScalar(rand(0.6, 2.2));
-  }
-  if (s.ball) { flash(s.ball.center, s.ball.R * 6, 0.9, softTex); dust(s.ball.center, 260); }
-  sparkle(); s.state = 'idle'; s.ball = null; counts.release++;
-  if (counts.release === 1) say('release', true);
+function release(f) {
+  f.state = 'dust'; f.dustT = 0; flash(f.u.uBallC.value, 0.9, 0.9, softTex); dust(f.u.uBallC.value, 220);
+  sparkle(); counts.release++; if (counts.release === 1) say('release', true);
 }
-function updateShards(dt, now) {
-  let n = 0;
-  for (const o of S) {
-    if (o.mode === 'dead') continue;
-    o.t += dt;
-    if (o.mode === 'fly') {
-      o.vel.multiplyScalar(Math.exp(-dt * 1.1));           // floaty, slow-motion drift like the movie
-      o.pos.addScaledVector(o.vel, dt);
-      o.av.multiplyScalar(Math.exp(-dt * 0.25));
-      if (o.t > 22) { o.mode = 'dust'; o.t = 0; }
-    } else if (o.mode === 'crush') {
-      const b = o.owner.ball; if (!b) { o.mode = 'dust'; o.t = 0; continue; }
-      tA.copy(o.off).applyQuaternion(b.quat).add(b.center);
-      const k = Math.min(1, o.t * 1.6);
-      o.vel.addScaledVector(tB.copy(tA).sub(o.pos), dt * (30 + 80 * k)); o.vel.multiplyScalar(Math.exp(-dt * 9));
-      o.pos.addScaledVector(o.vel, dt);
-      o.scl.lerp(tC.copy(o.base).multiplyScalar(0.55), dt * 3);
-      o.av.multiplyScalar(Math.exp(-dt * 4));
-    } else if (o.mode === 'dust') {
-      o.pos.addScaledVector(o.vel, dt); o.vel.multiplyScalar(Math.exp(-dt * 1.5));
-      o.scl.multiplyScalar(Math.exp(-dt * 4));
-      if (o.t > 1.4) { o.mode = 'dead'; continue; }
+function updateFrags(dt, now) {
+  for (let i = frags.length - 1; i >= 0; i--) {
+    const f = frags[i], u = f.u;
+    u.uTime.value = now / 1000;
+    if (f.state === 'hover' || f.state === 'locked') {
+      f.lock += ((f.state === 'locked' ? 1 : f.fading ? 0 : 0.5) - f.lock) * Math.min(1, dt * 10); u.uLock.value = f.lock;
+      if (f.fading && f.lock < 0.02) { disposeFrag(f); continue; }
+    } else {
+      u.uT.value += dt;
+      u.uCrush.value += (f.crushTarget - u.uCrush.value) * Math.min(1, dt * 3.2);
+      if (f.state === 'crushed') { u.uBallSpin.value += dt * 0.9; u.uBallC.value.y += Math.sin(now / 600) * dt * 0.025; }
+      if (f.state === 'exploded' && now - f.tExp > 25000) { f.state = 'dust'; f.dustT = 0; }
+      if (f.state === 'dust') { f.dustT += dt; u.uDust.value = Math.min(1, f.dustT / 1.3); if (f.dustT > 1.4) { disposeFrag(f); continue; } }
     }
-    tQ.setFromEuler(tE.set(o.av.x * dt, o.av.y * dt, o.av.z * dt)); o.quat.multiply(tQ);
-    tM.compose(o.pos, o.quat, o.scl); shards.setMatrixAt(n++, tM);
-  }
-  shards.count = n; shards.instanceMatrix.needsUpdate = true;
-  for (const s of surfaces.values()) if (s.ball) {
-    const b = s.ball; b.t += dt;
-    b.quat.multiply(tQ.setFromEuler(tE.set(dt * 0.4, dt * 0.9, dt * 0.2)));
-    b.center.y += Math.sin(now / 600) * dt * 0.03;
   }
   for (let i = flashes.length - 1; i >= 0; i--) {
     const f = flashes[i]; f.t += dt; const k = f.t / f.life;
     if (k >= 1) { scene.remove(f.sp); f.sp.material.dispose(); flashes.splice(i, 1); continue; }
-    if (f.shock) { f.sp.scale.setScalar(0.05 + f.size * Math.pow(k, 0.5)); f.sp.material.opacity = 0.5 * (1 - k); }
-    else { f.sp.material.opacity = 1 - k; f.sp.scale.setScalar(f.size * (0.6 + k * 0.8)); }
+    f.sp.material.opacity = 1 - k; f.sp.scale.setScalar(f.size * (0.6 + k * 0.8));
   }
 }
 // dust burst (points)
 const dusts = [];
 function dust(pos, N) {
   const p = new Float32Array(N * 3), v = [];
-  for (let i = 0; i < N; i++) { p.set([pos.x, pos.y, pos.z], i * 3); v.push(new THREE.Vector3().randomDirection().multiplyScalar(rand(0.3, 2.4))); }
+  for (let i = 0; i < N; i++) { p.set([pos.x, pos.y, pos.z], i * 3); v.push(new THREE.Vector3().randomDirection().multiplyScalar(rand(0.3, 2.2))); }
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p, 3));
-  const pts = new THREE.Points(g, new THREE.PointsMaterial({ map: softTex, size: 0.03, color: 0x9fd2ff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+  const pts = new THREE.Points(g, new THREE.PointsMaterial({ map: softTex, size: 0.025, color: 0x9fd2ff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
   scene.add(pts); dusts.push({ pts, v, t: 0 });
 }
 function updateDust(dt) {
@@ -354,17 +433,15 @@ function updateDust(dt) {
     if (d.t > 2) { scene.remove(d.pts); d.pts.geometry.dispose(); d.pts.material.dispose(); dusts.splice(i, 1); }
   }
 }
-const counts = { explode: 0, crush: 0, release: 0 };
 
 // ambient motes floating in the room
 const motes = (() => {
-  const N = 260, p = new Float32Array(N * 3);
+  const N = 220, p = new Float32Array(N * 3);
   for (let i = 0; i < N; i++) p.set([rand(-3, 3), rand(0.2, 2.6), rand(-3, 3)], i * 3);
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p, 3));
-  const m = new THREE.Points(g, new THREE.PointsMaterial({ map: softTex, size: 0.012, color: 0x7fbfff, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }));
+  const m = new THREE.Points(g, new THREE.PointsMaterial({ map: softTex, size: 0.01, color: 0x7fbfff, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }));
   scene.add(m); return m;
 })();
-
 // ---------------------------------------------------------------- hands: glowing blue joints + bones, gesture reading
 const JOINTS = ['wrist',
   'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
@@ -379,14 +456,14 @@ for (const chain of [[0, 1, 2, 3, 4], [0, 5, 6, 7, 8, 9], [0, 10, 11, 12, 13, 14
 BONES.push([5, 10], [10, 15], [15, 20], [6, 11], [11, 16], [16, 21]); // palm web
 function makeHand() {
   const pts = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(25 * 3), 3)),
-    new THREE.PointsMaterial({ map: glowTex, size: 0.045, color: 0x8fcaff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+    new THREE.PointsMaterial({ map: glowTex, size: 0.03, color: 0x8fcaff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
   const lines = new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(BONES.length * 6), 3)),
-    new THREE.LineBasicMaterial({ color: 0x5fb0ff, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false }));
+    new THREE.LineBasicMaterial({ color: 0x5fb0ff, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }));
   const palm = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0x6fb8ff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
   palm.scale.setScalar(0.16);
   pts.frustumCulled = lines.frustumCulled = false;
   scene.add(pts, lines, palm);
-  return { pts, lines, palm, J: JOINTS.map(() => new THREE.Vector3()), has: false, g: 'none', gRaw: 'none', gT: 0, prevG: 'none', aimDir: new THREE.Vector3(0, 0, -1), power: 0 };
+  return { pts, lines, palm, J: JOINTS.map(() => new THREE.Vector3()), rayO: new THREE.Vector3(), rayD: new THREE.Vector3(0, 0, -1), rayOK: false, has: false, g: 'none', gRaw: 'none', gT: 0, prevG: 'none', aimDir: new THREE.Vector3(0, 0, -1), power: 0 };
 }
 const hands = { left: makeHand(), right: makeHand() };
 const curl = (h, f) => {
@@ -423,7 +500,7 @@ function updateHandVisual(h, dt) {
   const target = h.g === 'fist' ? 1 : h.g === 'point' ? 0.6 : 0.3;
   h.power += (target - h.power) * Math.min(1, dt * 8);
   h.palm.material.opacity = 0.25 + h.power * 0.6; h.palm.scale.setScalar(0.12 + h.power * 0.1);
-  h.pts.material.size = 0.035 + h.power * 0.02;
+  h.pts.material.size = 0.024 + h.power * 0.014;
 }
 
 // pointing ray + reticle
@@ -449,15 +526,43 @@ function setHint(t) {
 }
 
 // ---------------------------------------------------------------- interaction state
-const st = { started: false, hover: null, hoverT: 0, locked: null, lockT: 0, lastAim: 0, taught: 0 };
+const st = { started: false, hover: null, hoverT: 0, locked: null, lockT: 0, lastAim: 0, lastBuild: 0, aim: null, capTried: false, needPinch: false, noCapture: false };
 const ray = new THREE.Raycaster();
-function latest(state) { let best = null; for (const s of surfaces.values()) if (s.state === state && (!best || (s.tExploded || 0) > (best.tExploded || 0))) best = s; return best; }
-function onGesture(h, from, to) {
+function aimHit(o, d) {
+  ray.set(o, d); ray.far = 7;
+  const ph = ray.intersectObjects(planeHits, false).find(x => !x.object.userData.src.gone);
+  const mh = rayMeshes(o, d);
+  if (mh && (!ph || mh.t < ph.distance + 0.05)) return { kind: 'mesh', m: mh.m, p: o.clone().addScaledVector(d, mh.t) };
+  if (ph) return { kind: 'plane', s: ph.object.userData.src, p: ph.point.clone() };
+  return null;
+}
+function targetFor(h) {
+  if (h.kind === 'mesh') {
+    const ids = chunkAt(h.m, h.p); if (ids.length < 3) return null;
+    const arr = new Float32Array(ids.length * 9); ids.forEach((t, i) => arr.set(h.m.P.subarray(t * 9, t * 9 + 9), i * 9));
+    return makeFrag(arr, { m: h.m, ids, anchor: h.p.clone() });
+  }
+  return makeFrag(planeTris(h.s), { plane: h.s, anchor: h.p.clone() });
+}
+function latest(state) { let best = null; for (const f of frags) if (f.state === state && (!best || f.tExp > best.tExp)) best = f; return best; }
+function onGesture(to) {
   if (to === 'open') {
     const c = latest('crushed'); if (c) { release(c); return; }
-    if (st.locked && st.locked.state === 'locked') { explode(st.locked); st.locked = null; hum(false); return; }
+    if (st.locked && st.locked.state === 'locked') {
+      const f = st.locked; st.locked = null; hum(false);
+      if (f.plane) f.plane.gone = true;
+      explode(f); if (st.hover === f) st.hover = null;
+      return;
+    }
   }
   if (to === 'fist') { const e = latest('exploded'); if (e) crush(e); }
+}
+function scanThin() { let t = 0; for (const m of meshes.values()) t += m.T; return t < 300 && planes.size < 4; }
+function tryCapture() {
+  st.capTried = true;
+  const s = renderer.xr.getSession();
+  if (!s || typeof s.initiateRoomCapture !== 'function') { st.noCapture = true; return; }
+  s.initiateRoomCapture().catch(() => { st.needPinch = true; });   // may need a user gesture: then the next pinch starts it
 }
 function updateInteraction(dt, now) {
   let aimHand = null;
@@ -465,54 +570,51 @@ function updateInteraction(dt, now) {
     const h = hands[side]; if (!h.has) { h.g = h.gRaw = 'none'; continue; }
     const g = classify(h);
     if (g !== h.gRaw) { h.gRaw = g; h.gT = 0; } else h.gT += dt;
-    if (h.gRaw !== h.g && h.gT > 0.08) { const from = h.g; h.g = h.gRaw; if (h.g !== 'none') { onGesture(h, h.prevG, h.g); h.prevG = h.g; } }
+    if (h.gRaw !== h.g && h.gT > 0.08) { h.g = h.gRaw; if (h.g !== 'none') onGesture(h.g); }
     if (h.g === 'point' && !aimHand) aimHand = h;
   }
-  // aim: index knuckle -> tip, smoothed
-  let hitS = null, hitP = null, hitN = null;
-  if (aimHand) {
-    const tip = aimHand.J[JI['index-finger-tip']], base = aimHand.J[JI['index-finger-phalanx-proximal']];
-    aimHand.aimDir.lerp(tA.copy(tip).sub(base).normalize(), Math.min(1, dt * 18)).normalize();
-    if (now - st.lastAim > 50) {
-      st.lastAim = now;
-      ray.set(tip, aimHand.aimDir); ray.far = 10;
-      const hit = ray.intersectObjects(targets, false).find(x => x.object.userData.surface.state === 'idle' || x.object.userData.surface.state === 'locked');
-      st.aimHit = hit ? { s: hit.object.userData.surface, p: hit.point.clone(), n: hit.face ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld) : aimHand.aimDir.clone().negate() } : null;
+  // aim ray: the Quest's own hand pointer ray (stable) while the hand is in a point pose
+  let src = null;
+  if (aimHand) src = aimHand.rayOK ? { o: aimHand.rayO, d: aimHand.rayD } : { o: aimHand.J[JI['index-finger-tip']], d: tA.copy(aimHand.J[JI['index-finger-tip']]).sub(aimHand.J[JI['index-finger-phalanx-proximal']]).normalize().clone() };
+  else if (st.fakeAim) src = st.fakeAim;
+  if (src && now - st.lastAim > 50) { st.lastAim = now; st.aim = aimHit(src.o, src.d); }
+  if (!src) st.aim = null;
+  const hit = st.aim;
+  if (src) {
+    const from = aimHand ? aimHand.J[JI['index-finger-tip']] : src.o, end = hit ? hit.p : tB.copy(src.o).addScaledVector(src.d, 4);
+    const la = aimLine.geometry.attributes.position; la.setXYZ(0, from.x, from.y, from.z); la.setXYZ(1, end.x, end.y, end.z); la.needsUpdate = true;
+    aimLine.material.opacity = 0.5; aimDot.material.opacity = hit ? 0.9 : 0; if (hit) aimDot.position.copy(hit.p);
+  } else { aimLine.material.opacity = 0; aimDot.material.opacity = 0; }
+
+  // hover: light up the REAL shape you're pointing at; hold 0.4 s to lock
+  if (hit) {
+    const h = st.hover;
+    const same = h && !h.fading && h.state === 'hover' && ((hit.kind === 'plane' && h.plane === hit.s) || (hit.kind === 'mesh' && h.m === hit.m && hit.p.distanceTo(h.anchor) < 0.3));
+    const onLocked = st.locked && st.locked.state === 'locked' && ((hit.kind === 'plane' && st.locked.plane === hit.s) || (hit.kind === 'mesh' && st.locked.m === hit.m && hit.p.distanceTo(st.locked.anchor) < 0.3));
+    if (onLocked) { st.lockT = now; }
+    else if (same) st.hoverT += dt;
+    else if (now - st.lastBuild > 160) {
+      if (h && h.state === 'hover') h.fading = true;
+      st.hover = targetFor(hit); st.hoverT = 0; st.lastBuild = now;
     }
-    if (st.aimHit) ({ s: hitS, p: hitP, n: hitN } = st.aimHit);
-    const end = hitP || tB.copy(tip).addScaledVector(aimHand.aimDir, 4);
-    const la = aimLine.geometry.attributes.position; la.setXYZ(0, tip.x, tip.y, tip.z); la.setXYZ(1, end.x, end.y, end.z); la.needsUpdate = true;
-    aimLine.material.opacity = 0.55; aimDot.material.opacity = hitP ? 0.9 : 0; if (hitP) aimDot.position.copy(hitP);
-  } else { aimLine.material.opacity = 0; aimDot.material.opacity = 0; st.aimHit = null; }
-
-  // hover -> lock
-  if (hitS !== st.hover) { st.hover = hitS; st.hoverT = 0; } else if (hitS) st.hoverT += dt;
-  if (hitS && hitS.state === 'idle' && st.hoverT > 0.35) {
-    if (st.locked && st.locked !== hitS && st.locked.state === 'locked') st.locked.state = 'idle';
-    st.locked = hitS; hitS.state = 'locked'; st.lockT = now; lockBlip(); hum(true);
+  } else if (st.hover && st.hover.state === 'hover') { st.hover.fading = true; st.hover = null; }
+  if (st.hover && st.hover.state === 'hover' && !st.hover.fading && st.hoverT > 0.4) {
+    if (st.locked && st.locked.state === 'locked') { st.locked.state = 'hover'; st.locked.fading = true; }
+    st.locked = st.hover; st.hover = null; st.locked.state = 'locked'; st.lockT = now; lockBlip(); hum(true);
   }
-  if (st.locked && st.locked.state === 'locked' && now - st.lockT > 7000 && st.hover !== st.locked) { st.locked.state = 'idle'; st.locked = null; hum(false); }
+  if (st.locked && st.locked.state === 'locked' && now - st.lockT > 7000) { st.locked.state = 'hover'; st.locked.fading = true; st.locked = null; hum(false); }
 
-  // outlines
-  for (const s of surfaces.values()) {
-    if (s.heavy) continue;
-    const want = s.state === 'locked' ? 1 : s.state === 'exploded' || s.state === 'crushed' ? 0.05 : (s === st.hover ? 0.6 : 0.12);
-    s.glow += (want - s.glow) * Math.min(1, dt * 6);
-    s.line.material.opacity = s.glow * (s.state === 'locked' ? 0.75 + 0.25 * Math.sin(now / 90) : 1);
-  }
-  if (st.locked && st.locked.state === 'locked') {
-    const s = st.locked, r = Math.max(s.size.x, s.size.z, s.size.y) * 0.6 + 0.1;
-    lockRing.position.copy(s.center); lockRing.lookAt(head.pos); lockRing.scale.setScalar(r * (1 + 0.06 * Math.sin(now / 120)));
-    lockRing.material.opacity = 0.6; lockRing.rotation.z += dt;
-  } else lockRing.material.opacity = 0;
+  if (st.started && !st.capTried && now - st.t0 > 3500 && !PREVIEW && scanThin()) tryCapture();
 
-  // teaching hints until the player has done the whole loop once
+  // hints until the player has done the whole loop once
   let t = null;
-  if (counts.release === 0) {
+  if (st.needPinch) t = 'PINCH TO SCAN YOUR ROOM';
+  else if (st.noCapture && scanThin()) t = 'DO SPACE SETUP IN QUEST SETTINGS FIRST';
+  else if (counts.release === 0) {
     if (latest('crushed')) t = 'OPEN YOUR HAND';
     else if (latest('exploded')) t = 'MAKE A FIST';
     else if (st.locked && st.locked.state === 'locked') t = 'OPEN YOUR HAND';
-    else if (!hands.left.has && !hands.right.has) t = st.ctrl ? 'PUT THE CONTROLLERS DOWN' : 'SHOW ME YOUR HANDS';
+    else if (!hands.left.has && !hands.right.has && !PREVIEW) t = st.ctrl ? 'PUT THE CONTROLLERS DOWN' : 'SHOW ME YOUR HANDS';
     else t = 'POINT AT SOMETHING';
   }
   setHint(t);
@@ -531,67 +633,72 @@ function loop(time, frame) {
         const key = pl.__k || (pl.__k = 'p' + Math.random().toString(36).slice(2)); alive.add(key);
         const pp = frame.getPose(pl.planeSpace, ref); if (pp) upsertPlane(key, pl, pl.semanticLabel || pl.orientation, pp.transform.matrix, pl.lastChangedTime);
       }
-      for (const [k, s] of surfaces) if (k[0] === 'p' && !alive.has(k) && s.state === 'idle') { scene.remove(s.group); surfaces.delete(k); rebuildTargets(); }
+      for (const [k, s] of planes) if (!alive.has(k) && !s.gone) { scene.remove(s.group); planes.delete(k); rebuildPlaneHits(); }
     }
     if (frame.detectedMeshes) {
       for (const me of frame.detectedMeshes) {
         const key = me.__k || (me.__k = 'm' + Math.random().toString(36).slice(2));
+        if (meshes.has(key) && !canRebuild(meshes.get(key), me.lastChangedTime)) continue;   // don't touch XR data unless it changed
         const mp = frame.getPose(me.meshSpace, ref); if (mp) upsertMesh(key, me, me.semanticLabel || 'other', mp.transform.matrix, me.lastChangedTime);
       }
     }
-    hands.left.has = hands.right.has = false; st.ctrl = false;
+    hands.left.has = hands.right.has = false; hands.left.rayOK = hands.right.rayOK = false; st.ctrl = false;
     for (const src of frame.session.inputSources) {
-      if (src.hand) readHand(frame, ref, src, hands[src.handedness] || hands.right);
-      else st.ctrl = true;
+      if (src.hand) {
+        const h = hands[src.handedness] || hands.right;
+        readHand(frame, ref, src, h);
+        const rp = src.targetRaySpace && frame.getPose(src.targetRaySpace, ref);
+        if (rp) { h.rayOK = true; h.rayO.copy(rp.transform.position); h.rayD.set(0, 0, -1).applyQuaternion(tQ.copy(rp.transform.orientation)); }
+      } else st.ctrl = true;
     }
-  } else if (PREVIEW) {
-    const s = now / 1000;
-    camera.position.set(0.3, 1.6, 1.2);
-    camera.rotation.set(-0.28 + Math.sin(s * 0.3) * 0.03, 0.12 + Math.sin(s * 0.2) * 0.08, 0, 'YXZ');
-    head.pos.copy(camera.position); head.quat.copy(camera.quaternion);
   }
-  head.fwd.set(0, 0, -1).applyQuaternion(head.quat);
-
   step(dt, now);
   renderer.render(scene, camera);
 }
 function step(dt, now) {
-  if (PREVIEW && demoT >= 0) { demoT += dt; runDemo(); }
-  if (st.started) {
-    updateInteraction(dt, now);
-    for (const side of ['left', 'right']) updateHandVisual(hands[side], dt);
-    updateShards(dt, now); updateDust(dt);
-    motes.material.opacity = Math.min(0.7, motes.material.opacity + dt * 0.3);
-    motes.rotation.y += dt * 0.01;
-    hint.m.position.copy(head.pos).addScaledVector(head.fwd, 0.9).addScaledVector(tA.set(0, 1, 0).applyQuaternion(head.quat), -0.28);
-    hint.m.quaternion.copy(head.quat);
-    if (now - st.idleT > 60000 && counts.explode > 0) { st.idleT = now; say('idle'); }
-    if (aimLine.material.opacity > 0 || shards.count > 0) st.idleT = now;
+  if (PREVIEW) {
+    const s = now / 1000;
+    camera.position.set(0.2, 1.55, 0.9);
+    camera.rotation.set(-0.42 + Math.sin(s * 0.3) * 0.02, 0.12 + Math.sin(s * 0.2) * 0.04, 0, 'YXZ');
+    camera.updateMatrixWorld(); head.pos.copy(camera.position); head.quat.copy(camera.quaternion);
+    if (demoT >= 0) { demoT += dt; runDemo(); }
   }
+  head.fwd.set(0, 0, -1).applyQuaternion(head.quat);
+  if (!st.started) return;
+  updateInteraction(dt, now);
+  for (const side of ['left', 'right']) updateHandVisual(hands[side], dt);
+  updateFrags(dt, now); updateDust(dt);
+  motes.material.opacity = Math.min(0.6, motes.material.opacity + dt * 0.3);
+  motes.rotation.y += dt * 0.01;
+  hint.m.position.copy(head.pos).addScaledVector(head.fwd, 0.9).addScaledVector(tA.set(0, 1, 0).applyQuaternion(head.quat), -0.28);
+  hint.m.quaternion.copy(head.quat);
+  if (aimLine.material.opacity > 0 || frags.length) st.idleT = now;
+  else if (now - st.idleT > 60000 && counts.explode > 0) { st.idleT = now; say('idle'); }
 }
 renderer.setAnimationLoop(loop);
 
-// scripted demo for ?preview (screenshots on a monitor), driven by sim time: lock the table, explode, lock + explode the couch, crush
+// scripted demo for ?preview, on sim time: point at the chair, lock, open = explode, point at the monitor, explode, (fist = crush, open = release)
 let demoT = -1; const demoDone = new Set();
 function at(t, key, f) { if (demoT >= t && !demoDone.has(key)) { demoDone.add(key); f(); } }
+function aimAt(x, y, z) { const o = head.pos.clone().add(new THREE.Vector3(0.15, -0.25, -0.2)); st.fakeAim = { o, d: new THREE.Vector3(x, y, z).sub(o).normalize() }; }
 function runDemo() {
-  const tbl = surfaces.get('table'), couch = surfaces.get('couch');
-  at(0.6, 'l1', () => { tbl.state = 'locked'; st.locked = tbl; st.lockT = performance.now(); });
-  at(1.5, 'e1', () => { explode(tbl); st.locked = null; });
-  at(2.0, 'l2', () => { couch.state = 'locked'; st.locked = couch; st.lockT = performance.now(); });
-  at(2.6, 'e2', () => { explode(couch); st.locked = null; });
-  if (Q.has('crush')) at(4.2, 'c1', () => crush(tbl));
-  if (Q.has('release')) at(6.0, 'r1', () => release(tbl));
+  at(0.2, 'a1', () => aimAt(-0.9, 0.5, -0.72));
+  at(1.4, 'e1', () => { st.fakeAim = null; onGesture('open'); });
+  at(1.8, 'a2', () => aimAt(0.2, 1.0, -1.48));
+  at(2.8, 'e2', () => { st.fakeAim = null; onGesture('open'); });
+  if (Q.has('crush')) at(4.2, 'c1', () => onGesture('fist'));
+  if (Q.has('release')) at(6.0, 'r1', () => onGesture('open'));
 }
 function demo() {
   demoT = 0;
   const T = parseFloat(Q.get('t') || '0'); let fake = performance.now();
   for (let i = 0; i < T * 60; i++) { fake += 1000 / 60; step(1 / 60, fake); }
+  lastT = performance.now();
 }
 
 // ---------------------------------------------------------------- start
 const go = document.getElementById('go'), msg = document.getElementById('msg'), start = document.getElementById('start');
-function begin() { st.started = true; st.idleT = performance.now(); setTimeout(() => say('boot', true), 900); flash(head.pos.clone().addScaledVector(head.fwd, 1.2), 1.2, 1.2, softTex); }
+function begin() { st.started = true; st.t0 = st.idleT = performance.now(); setTimeout(() => say('boot', true), 900); flash(head.pos.clone().addScaledVector(head.fwd, 1.2), 1.2, 1.2, softTex); }
 async function enter() {
   initAudio(); if (AC.state === 'suspended') AC.resume();
   if (PREVIEW) { start.style.display = 'none'; scene.background = new THREE.Color(0x141a22); buildFakeRoom(); begin(); demo(); return; }
@@ -605,6 +712,10 @@ async function enter() {
     renderer.xr.setReferenceSpaceType('local-floor'); renderer.xr.setFoveation(1);
     await renderer.xr.setSession(session);
     start.style.display = 'none';
+    session.addEventListener('select', () => {
+      if (!st.needPinch) return; st.needPinch = false;
+      if (typeof session.initiateRoomCapture === 'function') session.initiateRoomCapture().catch(() => { st.noCapture = true; });
+    });
     session.addEventListener('end', () => { start.style.display = 'flex'; st.started = false; });
     begin();
   } catch (e) { msg.textContent = 'Could not start: ' + e.message; }
