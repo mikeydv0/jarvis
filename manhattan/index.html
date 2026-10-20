@@ -29,7 +29,7 @@
   <button id="go">BECOME</button>
   <div id="msg">Hands only. Point at something · open your hand · make a fist · open again</div>
   <a id="other" href="../">← J.A.R.V.I.S.</a>
-  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fc4ff;opacity:.8">VERSION 5 · LIVE DEPTH</div>
+  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fc4ff;opacity:.8">VERSION 6 · LIVE DEPTH</div>
 </div>
 <script type="module">
 import * as THREE from '../vendor/three.module.js';
@@ -590,13 +590,22 @@ function depthRead(frame, pose) {
     DEP.status = 'LIVE DEPTH: EMPTY'; DEP.ok = false; return;
   }
   DEP.mode = DEP.sampler === 'u' ? 'lin' : (mx <= 1.0001 ? 'ndc' : 'lin');
-  DEP.toM = DEP.sampler === 'u' ? (info.rawValueToMeters || 0.001) : (DEP.mode === 'lin' ? (info.rawValueToMeters || 1) : 1);
+  DEP.src = DEP.mode;
+  if (DEP.mode === 'ndc') {
+    const n = info.depthNear || session.renderState.depthNear || 0.1, f = info.depthFar || Infinity;
+    for (let i = 0, N = DEP.W * DEP.H; i < N; i++) {
+      const d = D[i]; if (!(d > 0) || d >= 0.99999) { D[i] = 0; continue; }
+      D[i] = isFinite(f) ? (2 * n * f) / (f + n - (2 * d - 1) * (f - n)) : n / (1 - d);
+    }
+    DEP.mode = 'lin';
+  }
+  DEP.toM = DEP.sampler === 'u' ? (info.rawValueToMeters || 0.001) : (DEP.src === 'lin' ? (info.rawValueToMeters || 1) : 1);
   const P = info.projectionMatrix || view.projectionMatrix, X = (info.transform || view.transform).matrix;
   DEP.proj.fromArray(P); DEP.invProj.copy(DEP.proj).invert(); DEP.viewM.fromArray(X); DEP.viewInv.copy(DEP.viewM).invert();
   DEP.stamp++; DEP.ok = true; DEP.at = performance.now();
-  DEP.status = 'LIVE DEPTH: ON (' + DEP.mode + ')';
+  DEP.status = 'LIVE DEPTH: ON (' + DEP.src + ')';
   const cw = depthWorld(DEP.W >> 1, DEP.H >> 1, new THREE.Vector3());
-  DEP.info.centerD = +D[(DEP.H >> 1) * DEP.W + (DEP.W >> 1)].toFixed(4); DEP.info.centerDist = cw ? +cw.distanceTo(head.pos).toFixed(2) : null;
+  DEP.info.centerM = +D[(DEP.H >> 1) * DEP.W + (DEP.W >> 1)].toFixed(3); DEP.info.centerDist = cw ? +cw.distanceTo(head.pos).toFixed(2) : null;
 }
 const _dv = new THREE.Vector4();
 function depthWorld(i, j, out) {   // pixel -> world point (cached per read)
@@ -844,7 +853,7 @@ function depthSelfTest() {
 function fakeDepth() {
   camera.updateMatrixWorld(); camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
   DEP.proj.copy(camera.projectionMatrix); DEP.invProj.copy(camera.projectionMatrixInverse); DEP.viewM.copy(camera.matrixWorld); DEP.viewInv.copy(camera.matrixWorldInverse);
-  DEP.mode = 'ndc'; DEP.toM = 1;
+  DEP.mode = 'lin'; DEP.src = 'fake'; DEP.toM = 1;
   const o = camera.position.clone(), v = new THREE.Vector4(), dir = new THREE.Vector3(), c = new THREE.Vector4(), all = [...planes.values()].map(s => s.hit);
   for (let j = 0; j < DEP.H; j++) for (let i = 0; i < DEP.W; i++) {
     v.set(((i + 0.5) / DEP.W) * 2 - 1, ((j + 0.5) / DEP.H) * 2 - 1, 1, 1).applyMatrix4(DEP.invProj); v.divideScalar(v.w).applyMatrix4(DEP.viewM);
@@ -852,8 +861,8 @@ function fakeDepth() {
     ray.set(o, dir); ray.far = 8; const ph = ray.intersectObjects(all, false)[0], mh = rayMeshes(o, dir, 8);
     let t = Math.min(ph ? ph.distance : Infinity, mh ? mh.t : Infinity);
     if (!isFinite(t)) { DEP.D[j * DEP.W + i] = 0; continue; }
-    const p = o.clone().addScaledVector(dir, t); c.set(p.x, p.y, p.z, 1).applyMatrix4(DEP.viewInv).applyMatrix4(DEP.proj);
-    DEP.D[j * DEP.W + i] = (c.z / c.w) * 0.5 + 0.5;
+    const p = o.clone().addScaledVector(dir, t); c.set(p.x, p.y, p.z, 1).applyMatrix4(DEP.viewInv);
+    DEP.D[j * DEP.W + i] = -c.z;
   }
   DEP.stamp++; DEP.ok = true; DEP.at = 1e15; DEP.status = 'LIVE DEPTH: PREVIEW (fake room)';
 }
