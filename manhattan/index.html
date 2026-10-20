@@ -29,6 +29,7 @@
   <button id="go">BECOME</button>
   <div id="msg">Hands only. Point at something · open your hand · make a fist · open again</div>
   <a id="other" href="../">← J.A.R.V.I.S.</a>
+  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fc4ff;opacity:.8">VERSION 3 · LIVE DEPTH</div>
 </div>
 <script type="module">
 import * as THREE from '../vendor/three.module.js';
@@ -740,7 +741,7 @@ function updateInteraction(dt, now) {
     else if (!hands.left.has && !hands.right.has && !PREVIEW) t = st.ctrl ? 'PUT THE CONTROLLERS DOWN' : 'SHOW ME YOUR HANDS';
     else t = 'POINT AT SOMETHING';
   }
-  setHint(t, (PREVIEW || now - st.t0 < 15000) ? DEP.status : '');
+  setHint(t, (PREVIEW || now - st.t0 < 15000 || !DEP.ok) ? DEP.status : '');   // stays up while depth isn't working
 }
 
 // ---------------------------------------------------------------- main loop

@@ -1,5 +1,5 @@
 // Keeps the whole helmet on the headset: network first (so updates land when the PC is reachable), cache when it isn't.
-const CACHE = 'jarvis-v7';
+const CACHE = 'jarvis-v8';
 const VOICES = ['boot_morning', 'boot_afternoon', 'boot_evening', 'scan', 'scan_done', 'repulsors_on', 'repulsors_off', 'rim_on', 'rim_off',
   'quip_0', 'quip_1', 'quip_2', 'quip_3', 'quip_4', 'quip_5', 'wreck', 'lowpower', 'nohands'];
 const FILES = ['./', './index.html', './vendor/three.module.js', './manifest.json', './icon-192.png', './icon-512.png',
@@ -14,7 +14,7 @@ self.addEventListener('fetch', e => {
     const cache = await caches.open(CACHE);
     try {
       const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 2500);
-      const r = await fetch(e.request, { signal: ctl.signal, cache: 'no-cache' }); // always revalidate, Pages caches 10 min clearTimeout(t);
+      const r = await fetch(e.request, { signal: ctl.signal, cache: e.request.mode === 'navigate' ? 'reload' : 'no-cache' }); // always revalidate, Pages caches 10 min clearTimeout(t);
       if (r.ok) cache.put(e.request, r.clone());
       return r;
     } catch (err) {
