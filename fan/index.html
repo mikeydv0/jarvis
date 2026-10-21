@@ -33,16 +33,14 @@
   <div id="link">PC LINK · CHECKING…</div>
   <button id="go">TAKE CONTROL</button>
   <div id="moves">
-    <b>POINT + HOLD</b><span>lock onto your fan</span>
-    <b>PUSH</b><span>open palm, shove it at the fan = wind up</span>
-    <b>BOTH HANDS</b><span>push together = FULL POWER</span>
-    <b>PINCH + DRAG</b><span>up / down = dial the speed</span>
-    <b>SWIPE</b><span>sideways = swing on / off</span>
-    <b>FIST</b><span>squeeze = kill it</span>
+    <b>PUSH</b><span>open hand, shove it forward = more wind</span>
+    <b>PRESS DOWN</b><span>flat hand, push it down = less wind</span>
+    <b>FIST</b><span>squeeze = off</span>
+    <b>BOTH HANDS</b><span>push together = MAX</span>
   </div>
   <div id="msg"></div>
   <a class="nav" href="../">← J.A.R.V.I.S.</a>
-  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fd4ff;opacity:.8">VERSION 1</div>
+  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fd4ff;opacity:.8">VERSION 2 · 3 MOVES</div>
 </div>
 <script type="module">
 import * as THREE from '../vendor/three.module.js';
@@ -270,7 +268,7 @@ function drawLabel() {
 }
 
 // ---------------------------------------------------------------- wind: streaks pouring off the fan toward you
-const WN = 900;
+const WN = 380;
 const wind = {
   t: new Float32Array(WN), r: new Float32Array(WN), a: new Float32Array(WN), s: new Float32Array(WN),
   geo: new THREE.BufferGeometry(), dir: new THREE.Vector3(0, 0, 1), right: new THREE.Vector3(1, 0, 0), up: new THREE.Vector3(0, 1, 0), suck: 0, sw: 0, swAmp: 0,
@@ -279,7 +277,7 @@ wind.geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(WN 
 wind.geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(WN * 6), 3));
 wind.lines = new THREE.LineSegments(wind.geo, new THREE.LineBasicMaterial({ vertexColors: true, ...ADD }));
 wind.lines.frustumCulled = false; scene.add(wind.lines);
-const motesGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(260 * 3), 3));
+const motesGeo = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(120 * 3), 3));
 wind.motes = new THREE.Points(motesGeo, new THREE.PointsMaterial({ map: glowTex, size: 0.014, color: 0xbff0ff, opacity: 0.7, ...ADD }));
 wind.motes.frustumCulled = false; scene.add(wind.motes);
 function respawn(i) { wind.t[i] = Math.random() * 0.05; wind.r[i] = Math.sqrt(Math.random()) * R0; wind.a[i] = Math.random() * Math.PI * 2; wind.s[i] = rand(0.6, 1.2); }
@@ -303,7 +301,7 @@ function updateWind(dt, now) {
   levelColor(Math.max(1, FAN.level), wc);
   const v = 0.12 + k * 0.85, tail = 0.025 + k * 0.06;
   for (let i = 0; i < WN; i++) {
-    if (i >= active && wind.suck <= 0) { pos.fill(0, i * 6, i * 6 + 6); col.fill(0, i * 6, i * 6 + 6); if (i < 260) mp.fill(0, i * 3, i * 3 + 3); continue; }
+    if (i >= active && wind.suck <= 0) { pos.fill(0, i * 6, i * 6 + 6); col.fill(0, i * 6, i * 6 + 6); if (i < 120) mp.fill(0, i * 3, i * 3 + 3); continue; }
     wind.t[i] += dt * wind.s[i] * (wind.suck > 0 ? -2.4 : v);
     if (wind.t[i] > 1) respawn(i);
     if (wind.t[i] < 0) { wind.t[i] = 0; wind.r[i] *= 0.5; }
@@ -312,7 +310,7 @@ function updateWind(dt, now) {
     pos[i * 6] = tB.x; pos[i * 6 + 1] = tB.y; pos[i * 6 + 2] = tB.z; pos[i * 6 + 3] = tC.x; pos[i * 6 + 4] = tC.y; pos[i * 6 + 5] = tC.z;
     const fade = Math.min(1, t * 8) * Math.pow(1 - t, 1.5) * (0.35 + 0.65 * k) * (wind.suck > 0 ? 1.5 : 1);
     col[i * 6] = wc.r * fade; col[i * 6 + 1] = wc.g * fade; col[i * 6 + 2] = wc.b * fade; col[i * 6 + 3] = col[i * 6 + 4] = col[i * 6 + 5] = 0;
-    if (i < 260) { mp[i * 3] = tB.x; mp[i * 3 + 1] = tB.y; mp[i * 3 + 2] = tB.z; }
+    if (i < 120) { mp[i * 3] = tB.x; mp[i * 3 + 1] = tB.y; mp[i * 3 + 2] = tB.z; }
   }
   wind.geo.attributes.position.needsUpdate = wind.geo.attributes.color.needsUpdate = motesGeo.attributes.position.needsUpdate = true;
   wind.motes.material.opacity = 0.2 + k * 0.6;
@@ -346,7 +344,7 @@ function updateFx(dt) {
 }
 
 // ---------------------------------------------------------------- the powers (hands and controllers both land here)
-function diagEv(o) { diag({ app: 'fan', ...o, want: { ...want }, real: { ...real }, link: LINK.ok }); }
+function diagEv(o) { st.lastAct = performance.now(); diag({ app: 'fan', ...o, want: { ...want }, real: { ...real }, link: LINK.ok }); }
 function powerOn(level, from, big = 1) {
   const was = want.power; want.power = true; want.speed = clamp(level, 1, 12); command();
   if (from) pushRing(from, FAN.pos, levelColor(want.speed).getHex(), big);
@@ -355,25 +353,35 @@ function powerOn(level, from, big = 1) {
   if (!was) sweep(true);
   if (want.speed >= 12) say('max', big > 1.2); else if (!was) say('on');
 }
+function placeFan() {   // no setup: the holo fan appears 2.2 m out where you're facing, the first time you use a power
+  if (FAN.bound) return;
+  bindFan(head.pos.clone().addScaledVector(FWD, 2.2).setY(Math.max(0.7, head.pos.y - 0.4)));
+}
 function doPush(from, strength) {   // strength 0..1
-  if (!FAN.bound) return;
+  placeFan();
   const lv = !want.power ? (strength > 0.75 ? 12 : 6) : (strength > 0.75 ? 12 : want.speed + 3);
   powerOn(lv, from, 0.8 + strength * 0.5); diagEv({ ev: 'push', s: +strength.toFixed(2) });
 }
 function doTurbo(a, b) {
-  if (!FAN.bound) return;
+  placeFan();
   powerOn(12, a, 1.6); if (b) pushRing(b, FAN.pos, 0xff9a50, 1.6);
   for (let i = 0; i < WN; i++) wind.s[i] = rand(1.0, 1.8);
   setTimeout(() => { for (let i = 0; i < WN; i++) wind.s[i] = rand(0.6, 1.2); }, 2000);
   say('max', true); diagEv({ ev: 'turbo' });
 }
+function doSlow(from) {
+  placeFan(); if (!want.power) return;
+  want.speed = clamp(want.speed - 3, 1, 12); command();
+  pushRing(FAN.pos.clone().addScaledVector(UP, 0.35), FAN.pos, levelColor(want.speed).getHex(), 0.7);
+  flash(FAN.pos, 0.4, 0.4, levelColor(want.speed).getHex()); tick(want.speed); tick(want.speed - 1); diagEv({ ev: 'down' });
+}
 function doKill(from) {
-  if (!FAN.bound || !want.power) return;
+  placeFan(); if (!want.power) return;
   want.power = false; command(); wind.suck = 0.7;
   flash(FAN.pos, 0.8, 0.6, 0xff6a3a); sweep(false); say('off'); diagEv({ ev: 'fist' });
 }
 function doSwing(from) {
-  if (!FAN.bound) return;
+  placeFan();
   want.swing = !want.swing; command(); FAN.swingT = 0;
   whoosh(0.6); say(want.swing ? 'swing_on' : 'swing_off', true); diagEv({ ev: 'swipe', swing: want.swing });
 }
@@ -385,7 +393,7 @@ function dialTo(lv) {
 }
 function bindFan(p) {
   FAN.pos.copy(p); FAN.bound = true; FAN.appear = 0; FAN.g.visible = true;
-  flash(p, 1.0, 0.8, 0xbff4ff); lockBlip(); say('linked', true);
+  flash(p, 1.0, 0.8, 0xbff4ff); lockBlip();
   diagEv({ ev: 'bind', p: p.toArray().map(v => +v.toFixed(2)) });
 }
 
@@ -427,8 +435,6 @@ function readHand(frame, ref, src, h) {
 }
 function classify(h) {
   const I = curl(h, 'index-finger'), M = curl(h, 'middle-finger'), R = curl(h, 'ring-finger'), P = curl(h, 'pinky-finger');
-  const pinchD = h.J[4].distanceTo(h.J[9]);
-  if (pinchD < (h.pinch ? 0.04 : 0.022) && M > 1.35) return 'pinch';
   if (I > 1.62 && M < 1.38 && R < 1.38 && P < 1.45) return 'point';
   if (I < 1.32 && M < 1.32 && R < 1.32 && P < 1.4) return 'fist';
   if (I > 1.6 && M > 1.6 && R > 1.55 && P > 1.45) return 'open';
@@ -445,33 +451,6 @@ function handMotion(h, dt) {
   h.vel.lerp(tC, 0.5);
 }
 
-// aim line + reticle + bind progress ring
-const aimLine = new THREE.Line(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3)),
-  new THREE.LineBasicMaterial({ color: 0x8fe4ff, opacity: 0, ...ADD }));
-aimLine.frustumCulled = false; scene.add(aimLine);
-const aimDot = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xbff4ff, opacity: 0, ...ADD })); aimDot.scale.setScalar(0.08); scene.add(aimDot);
-const progGeo = new THREE.RingGeometry(0.09, 0.11, 48, 1, Math.PI / 2, -Math.PI * 2);
-const prog = new THREE.Mesh(progGeo, new THREE.MeshBasicMaterial({ color: 0xbff4ff, opacity: 0.9, side: THREE.DoubleSide, ...ADD })); prog.visible = false; scene.add(prog);
-
-// speed dial that floats over a pinching hand
-const dial = (() => {
-  const c = document.createElement('canvas'); c.width = c.height = 256; const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
-  const m = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 0.15), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false }));
-  m.renderOrder = 40; m.visible = false; scene.add(m); return { c, g: c.getContext('2d'), tex, m, lv: -1 };
-})();
-function drawDial(lv) {
-  if (lv === dial.lv) return; dial.lv = lv;
-  const { g, c } = dial; g.clearRect(0, 0, 256, 256);
-  for (let i = 0; i < 12; i++) {
-    const a0 = Math.PI * 0.75 + i * (Math.PI * 1.5 / 12), a1 = a0 + Math.PI * 1.5 / 12 - 0.05;
-    g.beginPath(); g.arc(128, 128, 104, a0, a1); g.lineWidth = 20; g.strokeStyle = i < lv ? '#' + levelColor(i + 1).getHexString() : 'rgba(120,180,210,0.25)'; g.stroke();
-  }
-  g.textAlign = 'center'; g.fillStyle = '#' + levelColor(lv).getHexString(); g.font = '700 92px "Segoe UI", Arial'; g.shadowColor = '#3fc8ff'; g.shadowBlur = 14;
-  g.fillText(lv >= 12 ? 'MAX' : String(lv), 128, 158); g.shadowBlur = 0;
-  g.font = '600 20px "Segoe UI", Arial'; g.fillStyle = 'rgba(190,240,255,0.8)'; g.fillText('▲ DRAG ▼', 128, 205);
-  dial.tex.needsUpdate = true;
-}
-
 // hint text, head-locked, low in view
 const hint = (() => {
   const c = document.createElement('canvas'); c.width = 900; c.height = 130; const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
@@ -482,7 +461,7 @@ function setHint(t, sub = '') {
   if (t + '|' + sub === hint.text) return; hint.text = t + '|' + sub;
   const { g, c } = hint; g.clearRect(0, 0, c.width, c.height);
   if (sub) { g.font = '600 24px "Segoe UI", Arial'; g.textAlign = 'center'; g.fillStyle = 'rgba(160,230,255,0.75)'; g.shadowBlur = 0; g.fillText(sub, c.width / 2, 112); }
-  if (t) { g.font = '600 40px "Segoe UI", Arial'; g.textAlign = 'center'; g.fillStyle = '#d8f6ff'; g.shadowColor = '#3fc8ff'; g.shadowBlur = 16; g.fillText(t, c.width / 2, 58); }
+  if (t) { g.font = '600 40px "Segoe UI", Arial'; const fs = Math.min(40, Math.floor(40 * 860 / g.measureText(t).width)); g.font = '600 ' + fs + 'px "Segoe UI", Arial'; g.textAlign = 'center'; g.fillStyle = '#d8f6ff'; g.shadowColor = '#3fc8ff'; g.shadowBlur = 16; g.fillText(t, c.width / 2, 58); }
   hint.tex.needsUpdate = true;
 }
 
@@ -496,71 +475,35 @@ function diag(o) {
 }
 addEventListener('error', e => diag({ app: 'fan', err: String(e.message), at: e.lineno }));
 
-// ---------------------------------------------------------------- room surfaces, only for locking onto the fan (ray -> what you point at)
-const roomHits = new Map(), hitMat = new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide });
-const ray = new THREE.Raycaster();
-function upsertRoom(key, geoFn, matrix, ver) {
-  const old = roomHits.get(key); if (old && old.ver === ver) { old.m.matrix.fromArray(matrix); old.m.matrixWorld.copy(old.m.matrix); return; }
-  if (old) old.m.geometry.dispose();
-  const m = new THREE.Mesh(geoFn(), hitMat); m.matrixAutoUpdate = false; m.matrix.fromArray(matrix); m.matrixWorld.copy(m.matrix);
-  roomHits.set(key, { m, ver });
-}
-function planeGeo(pl) {
-  const pts = pl.polygon.map(p => new THREE.Vector2(p.x, -p.z)); const g = new THREE.ShapeGeometry(new THREE.Shape(pts)); g.rotateX(-Math.PI / 2); return g;
-}
-function meshGeo(me) { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(me.vertices), 3)); g.setIndex(new THREE.BufferAttribute(new Uint32Array(me.indices), 1)); return g; }
-function aimPoint(o, d) {
-  ray.set(o, d); ray.far = 6;
-  const hit = ray.intersectObjects([...roomHits.values()].map(r => r.m), false)[0];
-  if (hit && hit.distance > 0.4) return hit.point.clone().addScaledVector(d, -0.05);
-  return o.clone().addScaledVector(d, 2.0);
-}
-
-// ---------------------------------------------------------------- gestures -> powers
-const BIND_HOLD = 0.7, REBIND_HOLD = 1.6;
+// ---------------------------------------------------------------- gestures -> powers (3 moves, no setup)
+const FWD = new THREE.Vector3(), tV = new THREE.Vector3();
 function updateHands(dt, now) {
-  let aiming = null;
+  FWD.copy(head.fwd); FWD.y = 0; FWD.normalize();
   const pushers = [];
   for (const side of ['left', 'right']) {
     const h = hands[side];
-    h.pushCD -= dt; h.swipeCD -= dt;
-    if (!h.has) { h.seen = 0; h.g = 'none'; h.pinch = false; continue; }
+    h.pushCD -= dt;
+    if (!h.has) { h.seen = 0; h.g = 'none'; continue; }
     handMotion(h, dt);
     const g = classify(h);
     if (g !== h.g) { h.g = g; h.gT = 0; } else h.gT += dt;
     if (g === 'open') h.openT = now;
 
-    // POINT + HOLD = lock the fan
-    if (g === 'point' && h.rayOK) aiming = h;
-
-    // PINCH + DRAG = speed dial
-    if (g === 'pinch' && FAN.bound) {
-      if (!h.pinch) { h.pinch = true; h.pinchY0 = h.J[9].y; h.pinchL0 = want.power ? want.speed : 0; }
-      const lv = h.pinchL0 + (h.J[9].y - h.pinchY0) / 0.05;   // 5 cm per level
-      if (Math.abs(h.J[9].y - h.pinchY0) > 0.035 || want.power) dialTo(Math.max(1, lv));
-      dial.m.visible = true; drawDial(want.speed);
-      dial.m.position.copy(h.J[9]).add(tB.set(0, 0.1, 0)); dial.m.quaternion.copy(head.quat);
-    } else if (h.pinch && g !== 'pinch') { h.pinch = false; }
-
-    if (!FAN.bound) continue;
-    tA.copy(FAN.pos).sub(h.pc); const toFan = tA.normalize();
-    const along = h.vel.dot(toFan), facing = h.n.dot(toFan);
-    tB.copy(h.vel).addScaledVector(toFan, -along); tB.y *= 0.5; const lateral = tB.length();
-
-    // PUSH: open hand shoved at the fan
-    if (g === 'open' && h.gT > 0.05 && h.pushCD <= 0 && along > 1.1 && Math.abs(facing) > 0.3 && along > lateral) {
-      h.pushCD = 0.7; h.pushT = now; pushers.push({ h, s: clamp((along - 1.1) / 1.4, 0, 1) });
+    const along = h.vel.dot(FWD), vy = h.vel.y;
+    tV.copy(h.vel).addScaledVector(FWD, -along); tV.y = 0; const lateral = tV.length();
+    // PUSH: open hand shoved forward = more wind
+    if (g === 'open' && h.gT > 0.05 && h.pushCD <= 0 && along > 1.1 && Math.abs(h.n.dot(FWD)) > 0.3 && along > Math.abs(vy) && along > lateral) {
+      h.pushCD = 0.8; h.pushT = now; pushers.push({ h, s: clamp((along - 1.1) / 1.4, 0, 1) });
     }
-    // SWIPE: open hand whipped sideways
-    else if ((g === 'open' || g === 'none') && h.swipeCD <= 0 && h.pushCD <= 0.3 && lateral > 1.7 && lateral > Math.abs(along) * 1.6 && Math.abs(h.vel.y) < lateral * 0.7) {
-      h.swipeCD = 1.2; h.pushCD = 0.5; doSwing(h.pc.clone());
-      FAN.sweepArc.rotation.z = (tB.dot(wind.right) > 0 ? 0 : Math.PI);
+    // PRESS DOWN: flat open hand pushed down = less wind
+    else if (g === 'open' && h.gT > 0.05 && h.pushCD <= 0 && vy < -1.0 && Math.abs(h.n.y) > 0.55 && -vy > Math.abs(along) && -vy > lateral) {
+      h.pushCD = 0.8; doSlow(h.pc.clone());
     }
-    // FIST: squeeze shut (from an open hand, held up) = kill it
+    // FIST: squeeze shut (from an open hand, held up) = off
     if (g === 'fist' && h.gT > 0.25 && now - h.openT < 1500 && h.pc.y > head.pos.y - 0.7 && !h.fistDone) { h.fistDone = true; doKill(h.pc.clone()); }
     if (g !== 'fist') h.fistDone = false;
   }
-  // two hands pushing in the same moment = TURBO
+  // two hands pushing in the same moment = MAX
   const L = hands.left, R = hands.right;
   if (pushers.length === 2 || (pushers.length === 1 && Math.abs(L.pushT - R.pushT) < 300 && L.has && R.has)) {
     doTurbo(L.pc.clone(), R.pc.clone()); L.pushCD = R.pushCD = 1.0;
@@ -568,23 +511,6 @@ function updateHands(dt, now) {
     // wait a beat for the other hand: if it never comes, it's a normal push
     const p = pushers[0]; setTimeout(() => { const o = p.h === L ? R : L; if (Math.abs(o.pushT - p.h.pushT) >= 300 || !o.has) doPush(p.h.pc.clone(), p.s); }, 160);
   }
-
-  // aiming (point) = lock the fan there
-  if (aiming) {
-    const h = aiming, need = FAN.bound ? REBIND_HOLD : BIND_HOLD;
-    if (!h.aimP || now - (h.aimAt || 0) > 100) { h.aimAt = now; h.aimP = aimPoint(h.rayO, h.rayD); }   // room mesh raycast = not every frame
-    const p = h.aimP;
-    const la = aimLine.geometry.attributes.position; la.setXYZ(0, h.rayO.x, h.rayO.y, h.rayO.z); la.setXYZ(1, p.x, p.y, p.z); la.needsUpdate = true;
-    aimLine.material.opacity = 0.6; aimDot.material.opacity = 0.9; aimDot.position.copy(p);
-    const k = clamp(h.gT / need, 0, 1);
-    prog.visible = true; prog.position.copy(p); prog.lookAt(head.pos);
-    progGeo.setDrawRange(0, Math.floor(48 * k) * 6);
-    if (k >= 1 && !h.bindDone) { h.bindDone = true; bindFan(aimPoint(h.rayO, h.rayD)); }
-  } else {
-    aimLine.material.opacity = Math.max(0, aimLine.material.opacity - dt * 4); aimDot.material.opacity = aimLine.material.opacity; prog.visible = false;
-  }
-  for (const side of ['left', 'right']) if (hands[side].g !== 'point') hands[side].bindDone = false;
-  if (!hands.left.pinch && !hands.right.pinch) dial.m.visible = false;
 }
 function updateHandVisual(h, dt) {
   const vis = h.has; h.pts.visible = h.lines.visible = h.palm.visible = vis;
@@ -596,10 +522,10 @@ function updateHandVisual(h, dt) {
   BONES.forEach(([a, b], i) => { la.setXYZ(i * 2, h.J[a].x, h.J[a].y, h.J[a].z); la.setXYZ(i * 2 + 1, h.J[b].x, h.J[b].y, h.J[b].z); });
   la.needsUpdate = true;
   h.palm.position.copy(h.pc);
-  const target = h.g === 'open' ? 0.9 : h.g === 'pinch' ? 0.7 : h.g === 'fist' ? 0.5 : 0.25;
+  const target = h.g === 'open' ? 0.9 : h.g === 'fist' ? 0.5 : 0.25;
   h.glow += (target - h.glow) * Math.min(1, dt * 8);
   h.palm.material.opacity = 0.2 + h.glow * 0.6; h.palm.scale.setScalar(0.1 + h.glow * 0.12);
-  h.palm.material.color.copy(h.g === 'fist' ? C_HOT : h.g === 'pinch' ? levelColor(want.speed) : C_LOW);
+  h.palm.material.color.copy(h.g === 'fist' ? C_HOT : C_LOW);
 }
 
 // controllers: trigger = push, squeeze = kill, stick up/down = dial, A/X = swing, both triggers = turbo
@@ -610,8 +536,7 @@ function readPad(src, frame, ref) {
   const rp = src.targetRaySpace && frame.getPose(src.targetRaySpace, ref);
   if (rp) p.pos.copy(rp.transform.position);
   const trig = gp.buttons[0] && gp.buttons[0].pressed, sq = gp.buttons[1] && gp.buttons[1].pressed, btn = gp.buttons[4] && gp.buttons[4].pressed;
-  if (!FAN.bound && trig && !p.trig && rp) { const d = new THREE.Vector3(0, 0, -1).applyQuaternion(tQ.copy(rp.transform.orientation)); bindFan(aimPoint(p.pos, d)); }
-  else if (trig && !p.trig) { p.t = performance.now(); const o = pads[src.handedness === 'left' ? 'right' : 'left'];
+  if (trig && !p.trig) { p.t = performance.now(); const o = pads[src.handedness === 'left' ? 'right' : 'left'];
     if (o && performance.now() - o.t < 250) doTurbo(p.pos.clone(), o.pos.clone()); else doPush(p.pos.clone(), 0.4); }
   if (sq && !p.sq) doKill(p.pos.clone());
   if (btn && !p.btn) doSwing(p.pos.clone());
@@ -653,14 +578,6 @@ function loop(time, frame) {
   if (frame) {
     const ref = renderer.xr.getReferenceSpace(), pose = frame.getViewerPose(ref);
     if (pose) { const p = pose.transform.position, o = pose.transform.orientation; head.pos.set(p.x, p.y, p.z); head.quat.set(o.x, o.y, o.z, o.w); }
-    if (frame.detectedPlanes) for (const pl of frame.detectedPlanes) {
-      const key = pl.__k || (pl.__k = 'p' + Math.random().toString(36).slice(2));
-      const pp = frame.getPose(pl.planeSpace, ref); if (pp) upsertRoom(key, () => planeGeo(pl), pp.transform.matrix, pl.lastChangedTime);
-    }
-    if (frame.detectedMeshes) for (const me of frame.detectedMeshes) {
-      const key = me.__k || (me.__k = 'm' + Math.random().toString(36).slice(2));
-      const mp = frame.getPose(me.meshSpace, ref); if (mp) upsertRoom(key, () => meshGeo(me), mp.transform.matrix, me.lastChangedTime);
-    }
     hands.left.has = hands.right.has = false; hands.left.rayOK = hands.right.rayOK = false;
     for (const src of frame.session.inputSources) {
       if (src.hand) {
@@ -690,10 +607,9 @@ function step(dt, now) {
   updateSound(FAN.bound ? FAN.level : 0, wind.sw);
   hint.m.position.copy(head.pos).addScaledVector(head.fwd, 0.9).addScaledVector(tA.set(0, 1, 0).applyQuaternion(head.quat), -0.3);
   hint.m.quaternion.copy(head.quat);
-  if (!FAN.bound) setHint('POINT AT YOUR FAN · HOLD', 'index finger out, keep it steady' + (LINK.ok ? '' : ' · PC link not found yet'));
-  else if (!LINK.ok) setHint('PC LINK OFFLINE', 'double-click FAN POWERS on your PC');
+  if (!LINK.ok) setHint('PC LINK OFFLINE', 'double-click FAN POWERS on your PC');
   else if (!LINK.fanOnline) setHint('FAN NOT ANSWERING', 'is it plugged in?');
-  else if (st.t < 25 || now - (st.lastAct || 0) > 30000) setHint('PUSH · PINCH+DRAG · SWIPE · FIST', 'both hands push = FULL POWER · point+hold = move the fan lock');
+  else if (st.t < 40 || now - (st.lastAct || 0) > 20000) setHint('PUSH = MORE  ·  PRESS DOWN = LESS  ·  FIST = OFF', 'face the fan · both hands push = MAX');
   else setHint('');
   if (LINK.wasOk && !LINK.ok && now - (st.offT || 0) > 30000) { st.offT = now; say('offline', true); }
   LINK.wasOk = LINK.ok;
@@ -713,7 +629,8 @@ function runDemo() {
   if (Q.has('kill')) at(4.0, 'kill', () => doKill(new THREE.Vector3(0.2, 1.3, 0.2)));
 }
 function demo() {
-  demoT = 0; step(0, performance.now());
+  demoT = Q.has('nodemo') ? -1 : 0; step(0, performance.now());
+  window.__fan = { hands, want, FAN, step };   // test hook (preview only)
   const T = parseFloat(Q.get('t') || '0'); let fake = performance.now();
   for (let i = 0; i < T * 60; i++) { fake += 1000 / 60; step(1 / 60, fake); }
   lastT = performance.now();
@@ -737,7 +654,7 @@ async function enter() {
     msg.textContent = 'Open this page in the Quest browser. (Add ?preview to see it on a monitor.)'; return;
   }
   try {
-    const session = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['local-floor'], optionalFeatures: ['hand-tracking', 'plane-detection', 'mesh-detection'] });
+    const session = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['local-floor'], optionalFeatures: ['hand-tracking'] });
     renderer.xr.setReferenceSpaceType('local-floor'); renderer.xr.setFoveation(1);
     await renderer.xr.setSession(session);
     start.style.display = 'none';
