@@ -1,5 +1,5 @@
 // Keeps the whole helmet on the headset: network first (so updates land when the PC is reachable), cache when it isn't.
-const CACHE = 'jarvis-v14';
+const CACHE = 'jarvis-v15';
 const VOICES = ['boot_morning', 'boot_afternoon', 'boot_evening', 'scan', 'scan_done', 'repulsors_on', 'repulsors_off', 'rim_on', 'rim_off',
   'quip_0', 'quip_1', 'quip_2', 'quip_3', 'quip_4', 'quip_5', 'wreck', 'lowpower', 'nohands'];
 const FILES = ['./', './index.html', './vendor/three.module.js', './manifest.json', './icon-192.png', './icon-512.png',
@@ -8,6 +8,7 @@ const FILES = ['./', './index.html', './vendor/three.module.js', './manifest.jso
   ...['boot', 'explode_0', 'explode_1', 'crush_0', 'crush_1', 'release', 'idle', 'many'].map(v => './manhattan/audio/' + v + '.mp3'),
   './desert/', './desert/index.html',
   ...['boot', 'explode_0', 'explode_1', 'crush_0', 'crush_1', 'release', 'wave', 'shot'].map(v => './desert/audio/' + v + '.mp3'),
+  './nightvision/', './nightvision/index.html',
   './fan/', './fan/index.html', './fan/manifest.json', './fan/icon-192.png', './fan/icon-512.png',
   ...['boot', 'linked', 'on', 'max', 'off', 'swing_on', 'swing_off', 'offline'].map(v => './fan/audio/' + v + '.mp3')];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });

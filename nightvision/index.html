@@ -1,0 +1,323 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NIGHT VISION</title>
+<link rel="icon" href="../icon-192.png">
+<meta name="theme-color" content="#020802">
+<style>
+  html,body{margin:0;height:100%;background:#020802;color:#8dff9a;font-family:'Segoe UI',Arial,sans-serif;overflow:hidden}
+  #start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;z-index:2;
+    background:radial-gradient(circle at 50% 44%,#0d3312 0%,#020802 68%)}
+  #start .brand{font-size:13px;letter-spacing:12px;opacity:.55}
+  #start h1{margin:0;font-weight:300;letter-spacing:16px;font-size:44px;color:#d4ffd9;text-shadow:0 0 20px #2bff4a}
+  #go{font-size:26px;letter-spacing:8px;padding:24px 64px;background:transparent;color:#d4ffd9;border:2px solid #4dff66;
+    border-radius:60px;box-shadow:0 0 30px #18b82e inset,0 0 34px #18b82e;cursor:pointer}
+  #go:active{background:#4dff6633}
+  #msg{opacity:.78;font-size:15px;letter-spacing:2px;max-width:660px;text-align:center;line-height:1.6}
+  #start a{color:#8dff9a;opacity:.55;font-size:13px;letter-spacing:4px;text-decoration:none}
+  canvas{display:block}
+  video{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="start">
+  <div class="brand">GEN III · PVS</div>
+  <h1>NIGHT VISION</h1>
+  <button id="go">GOGGLES ON</button>
+  <div id="msg">Turn the lights off.<br>Trigger / pinch right = GREEN · WHITE · THERMAL &nbsp;·&nbsp; left = IR flashlight &nbsp;·&nbsp; stick = gain</div>
+  <a href="../">← JARVIS</a>
+</div>
+<video id="cam" muted playsinline autoplay></video>
+<script type="module">
+import * as THREE from '../vendor/three.module.js';
+
+const Q = new URLSearchParams(location.search);
+const PREVIEW = Q.has('preview');
+const LS = (k, d) => { try { const v = localStorage.getItem('nv_' + k); return v === null ? d : +v; } catch (e) { return d; } };
+const SAVE = (k, v) => { try { localStorage.setItem('nv_' + k, v); } catch (e) {} };
+
+// ---------------------------------------------------------------- renderer / scene
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x000000, 1);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(90, innerWidth / innerHeight, 0.05, 50);
+camera.position.set(0, 1.6, 0);
+scene.add(camera);
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+// ---------------------------------------------------------------- remote diagnostics (camera info, errors, fps)
+const DIAG_URL = 'https://ntfy.sh/mk-manhattan-q3d7x2';
+let diagN = 0;
+function diag(o) { if (PREVIEW || diagN++ > 40) return; try { fetch(DIAG_URL, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ app: 'nv', ...o }) }); } catch (e) {} }
+addEventListener('error', e => diag({ err: String(e.message), at: e.lineno }));
+addEventListener('unhandledrejection', e => diag({ err: String(e.reason && e.reason.message || e.reason) }));
+
+// ---------------------------------------------------------------- the camera (Quest passthrough camera through getUserMedia)
+const video = document.getElementById('cam');
+const msg = document.getElementById('msg'), go = document.getElementById('go'), start = document.getElementById('start');
+const st = { camOK: false, camErr: '', vw: 1280, vh: 960, capT: 0, lat: Q.has('lat') ? +Q.get('lat') : 85, latN: 0 };
+async function startCamera() {
+  if (st.camOK) return true;
+  if (Q.has('test')) { useTestImage(); return true; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { st.camErr = 'no camera API'; return false; }
+  const tries = [
+    { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 960 }, frameRate: { ideal: 30 } }, audio: false },
+    { video: true, audio: false }];
+  for (const c of tries) {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia(c);
+      video.srcObject = s; await video.play().catch(() => {});
+      const tr = s.getVideoTracks()[0], set = tr ? tr.getSettings() : {};
+      st.vw = set.width || video.videoWidth || 1280; st.vh = set.height || video.videoHeight || 960; st.camOK = true;
+      let devs = []; try { devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput').map(d => d.label || '?'); } catch (e) {}
+      diag({ cam: { w: st.vw, h: st.vh, fps: set.frameRate, label: tr && tr.label, facing: set.facingMode }, devs });
+      watchFrames(); fitScreen();
+      return true;
+    } catch (e) { st.camErr = e.name + ': ' + e.message; diag({ camErr: st.camErr }); }
+  }
+  return false;
+}
+// when each camera frame was really taken (so the picture is drawn where your head WAS, not where it is now = no swimming)
+function watchFrames() {
+  if (!video.requestVideoFrameCallback) return;
+  const cb = (now, md) => {
+    if (md && md.captureTime) { const l = performance.now() - md.captureTime; if (l > 5 && l < 400) { st.lat += (l + 12 - st.lat) * 0.1; st.latN++; } }
+    video.requestVideoFrameCallback(cb);
+  };
+  video.requestVideoFrameCallback(cb);
+}
+// desktop check without a camera: a dark fake room
+let testCanvas = null;
+function useTestImage() {
+  const c = testCanvas = document.createElement('canvas'); c.width = 1280; c.height = 960; const g = c.getContext('2d');
+  const gr = g.createLinearGradient(0, 0, 0, 960); gr.addColorStop(0, '#0b0b10'); gr.addColorStop(0.62, '#121014'); gr.addColorStop(0.63, '#07070a'); gr.addColorStop(1, '#040405');
+  g.fillStyle = gr; g.fillRect(0, 0, 1280, 960);
+  g.fillStyle = '#1a1a22'; g.fillRect(140, 300, 300, 290); g.fillStyle = '#08080c'; g.fillRect(160, 320, 260, 250);   // doorway
+  g.fillStyle = '#16161b'; g.fillRect(620, 420, 420, 200); g.fillStyle = '#0d0d10'; g.fillRect(650, 620, 20, 150); g.fillRect(990, 620, 20, 150);   // desk
+  g.fillStyle = '#25252e'; g.fillRect(720, 250, 230, 150); g.fillStyle = '#303848'; g.fillRect(735, 262, 200, 122);   // monitor
+  g.fillStyle = '#5a5a40'; g.beginPath(); g.arc(1120, 170, 10, 0, 7); g.fill();   // standby LED
+  g.fillStyle = '#121216'; g.beginPath(); g.ellipse(330, 840, 260, 70, 0, 0, 7); g.fill();   // rug
+  st.camOK = true; st.vw = 1280; st.vh = 960; fitScreen();
+}
+
+// ---------------------------------------------------------------- the goggle image: camera -> intensifier tube
+const tex = new THREE.Texture(video);
+tex.minFilter = tex.magFilter = THREE.LinearFilter; tex.generateMipmaps = false;
+const U = {
+  tex: { value: tex }, texel: { value: new THREE.Vector2(1 / 1280, 1 / 960) }, aspect: { value: 4 / 3 },
+  gain: { value: 4 }, mode: { value: LS('mode', 0) }, ir: { value: 0 }, time: { value: 0 }, on: { value: 0 }, flash: { value: 0 }
+};
+const nvMat = new THREE.ShaderMaterial({
+  uniforms: U, depthTest: false, depthWrite: false,
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tex; uniform vec2 texel; uniform float aspect, gain, mode, ir, time, on, flash; varying vec2 vUv;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+    float lum(vec2 uv){ return dot(texture2D(tex, uv).rgb, vec3(0.30, 0.59, 0.11)); }
+    vec3 iron(float t){   // thermal palette: black -> purple -> red -> orange -> yellow -> white
+      t = clamp(t, 0.0, 1.0);
+      vec3 c = mix(vec3(0.0, 0.0, 0.03), vec3(0.35, 0.0, 0.55), smoothstep(0.0, 0.25, t));
+      c = mix(c, vec3(0.9, 0.08, 0.15), smoothstep(0.2, 0.45, t));
+      c = mix(c, vec3(1.0, 0.55, 0.0), smoothstep(0.42, 0.68, t));
+      c = mix(c, vec3(1.0, 0.95, 0.3), smoothstep(0.65, 0.88, t));
+      return mix(c, vec3(1.0), smoothstep(0.88, 1.0, t));
+    }
+    void main(){
+      vec2 uv = vUv;
+      vec2 cc = vec2((uv.x - 0.5) * aspect, uv.y - 0.5);
+      float r = length(cc);
+      float tube = smoothstep(0.5, 0.465, r);                       // the round goggle view
+      float g = gain * (1.0 + ir * 3.2 * exp(-r * r * 16.0));         // IR flashlight: a bright pool in the middle
+      float L = lum(uv);
+      // halo around bright lights (the classic NV bloom)
+      float b = 0.0; vec2 o = texel * 5.0;
+      b += lum(uv + vec2(o.x, 0.0)) + lum(uv - vec2(o.x, 0.0)) + lum(uv + vec2(0.0, o.y)) + lum(uv - vec2(0.0, o.y));
+      b += lum(uv + o * 1.6) + lum(uv - o * 1.6) + lum(uv + vec2(o.x, -o.y) * 1.6) + lum(uv + vec2(-o.x, o.y) * 1.6);
+      b *= 0.125;
+      float v = 1.0 - exp(-L * g * 1.5);
+      v += max(b * g - 0.55, 0.0) * 0.45;
+      // grain: the darker it is (more gain), the noisier, like a real tube
+      vec2 px = floor(uv / texel * 0.9);
+      float n = hash(px + fract(time * 7.31) * 113.0);
+      float noiseAmt = 0.05 + 0.13 * clamp((g - 1.0) / 14.0, 0.0, 1.0);
+      v += (n - 0.5) * 2.0 * noiseAmt;
+      v += step(0.9988, hash(px * 1.37 + fract(time * 3.7) * 71.0)) * 0.7;   // scintillation sparkles
+      // honeycomb fiber-optic pattern (barely there)
+      vec2 hp = uv * vec2(aspect, 1.0) * 260.0; vec2 hq = vec2(hp.x + hp.y * 0.5, hp.y * 0.866);
+      v *= 0.97 + 0.03 * smoothstep(0.15, 0.4, length(fract(hq) - 0.5));
+      v = max(v, 0.0) * on + flash;
+      vec3 col;
+      if (mode < 0.5) {   // green phosphor (P43)
+        col = mix(vec3(0.0, 0.035, 0.008), vec3(0.32, 1.0, 0.36), clamp(v, 0.0, 1.0));
+        col = mix(col, vec3(0.86, 1.0, 0.86), smoothstep(0.86, 1.25, v));
+      } else if (mode < 1.5) {   // white phosphor (P45)
+        col = mix(vec3(0.008, 0.012, 0.03), vec3(0.86, 0.93, 1.0), clamp(v, 0.0, 1.0));
+        col = mix(col, vec3(1.0), smoothstep(0.86, 1.25, v));
+      } else {   // thermal look
+        float t = 1.0 - exp(-(b * 0.5 + L * 0.5) * g * 1.3);
+        col = iron(t + (n - 0.5) * 0.04) * on + flash;
+      }
+      col += vec3(0.02, 0.09, 0.03) * smoothstep(0.43, 0.49, r) * tube * (mode < 0.5 ? 1.0 : 0.3);   // glow on the lens rim
+      gl_FragColor = vec4(col * tube, 1.0);
+    }`
+});
+if (Q.has('mode')) U.mode.value = +Q.get('mode'); if (Q.has('ir')) U.ir.value = 1;
+const screen = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), nvMat);
+screen.frustumCulled = false; scene.add(screen);
+const D = 3;   // the picture hangs 3 m out (only its angle matters)
+function fitScreen() {
+  const hfov = THREE.MathUtils.degToRad(LS('fov', Q.has('fov') ? +Q.get('fov') : 76));
+  const w = 2 * D * Math.tan(hfov / 2), h = w * st.vh / st.vw;
+  screen.scale.set(w, h, 1); U.aspect.value = st.vw / st.vh; U.texel.value.set(1 / st.vw, 1 / st.vh);
+}
+fitScreen();
+
+// ---------------------------------------------------------------- readout inside the tube
+const hud = (() => {
+  const c = document.createElement('canvas'); c.width = 1024; c.height = 96; const g = c.getContext('2d');
+  const t = new THREE.CanvasTexture(c);
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.094), new THREE.MeshBasicMaterial({ map: t, transparent: true, depthTest: false, depthWrite: false }));
+  m.renderOrder = 2; m.frustumCulled = false; screen.add(m); m.position.set(0, -0.37, 0.001);
+  return { c, g, t, m, last: '' };
+})();
+const MODES = ['GREEN', 'WHITE', 'THERMAL'], MODE_COL = ['#7dff8c', '#e2ecff', '#ffb347'];
+function drawHud() {
+  const s = `${MODES[U.mode.value]}   ${st.manual ? 'GAIN' : 'AUTO'} ${U.gain.value.toFixed(1)}x${U.ir.value > 0.5 ? '   IR' : ''}${st.camOK ? '' : '   NO CAMERA'}`;
+  if (s === hud.last) return; hud.last = s;
+  const { g, c } = hud; g.clearRect(0, 0, c.width, c.height);
+  g.font = '600 46px Consolas, "Courier New", monospace'; g.textAlign = 'center'; g.fillStyle = MODE_COL[U.mode.value]; g.globalAlpha = 0.8;
+  g.fillText(s, c.width / 2, 62); hud.t.needsUpdate = true;
+}
+// the readout is a child of the stretched screen: undo the stretch so the text keeps its shape (0.55 of the picture height wide)
+function fitHud() { hud.m.scale.set(0.55 * screen.scale.y / screen.scale.x, 0.55, 1); }
+
+// ---------------------------------------------------------------- auto gain (looks at a tiny copy of the camera image)
+const meter = document.createElement('canvas'); meter.width = 40; meter.height = 30;
+const mg = meter.getContext('2d', { willReadFrequently: true });
+st.auto = 4; st.bias = LS('bias', 1); st.manual = false; let meterT = 0;
+function meterLight() {
+  const src = testCanvas || video;
+  if (!testCanvas && video.readyState < 2) return;
+  mg.drawImage(src, 0, 0, 40, 30); const d = mg.getImageData(0, 0, 40, 30).data;
+  let s = 0; for (let i = 0; i < d.length; i += 4) s += (d[i] * 0.3 + d[i + 1] * 0.59 + d[i + 2] * 0.11) / 255;
+  const mean = s / (d.length / 4);
+  st.mean = mean; st.auto = THREE.MathUtils.clamp(0.42 / Math.max(mean, 0.004), 1, 16);
+}
+
+// ---------------------------------------------------------------- sound: the power-on whine + clicks
+let AC = null;
+function initAudio() { if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)(); if (AC.state === 'suspended') AC.resume(); }
+function whine(on) {
+  if (!AC) return; const t = AC.currentTime, o = AC.createOscillator(), g = AC.createGain();
+  o.type = 'sine'; o.frequency.setValueAtTime(on ? 1800 : 9000, t); o.frequency.exponentialRampToValueAtTime(on ? 9500 : 1500, t + 1.1);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.05, t + 0.15); g.gain.exponentialRampToValueAtTime(0.0001, t + 1.4);
+  o.connect(g).connect(AC.destination); o.start(t); o.stop(t + 1.5);
+}
+function click(f = 2400) {
+  if (!AC) return; const t = AC.currentTime, o = AC.createOscillator(), g = AC.createGain();
+  o.type = 'square'; o.frequency.value = f; g.gain.setValueAtTime(0.05, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+  o.connect(g).connect(AC.destination); o.start(t); o.stop(t + 0.06);
+}
+
+// ---------------------------------------------------------------- controls
+function nextMode() { U.mode.value = (U.mode.value + 1) % 3; SAVE('mode', U.mode.value); U.flash.value = 0.35; click(); }
+function toggleIR() { U.ir.value = U.ir.value > 0.5 ? 0 : 1; click(U.ir.value ? 3200 : 1600); }
+function onSelect(e) { const hnd = e.inputSource && e.inputSource.handedness; if (hnd === 'left') toggleIR(); else nextMode(); }
+addEventListener('keydown', e => {
+  if (e.key === 'm') nextMode(); if (e.key === 'i') toggleIR();
+  if (e.key === 'ArrowUp') { st.bias = Math.min(st.bias * 1.15, 6); SAVE('bias', st.bias); }
+  if (e.key === 'ArrowDown') { st.bias = Math.max(st.bias / 1.15, 0.2); SAVE('bias', st.bias); }
+});
+let stickHold = 0;
+function readSticks(session, dt) {
+  for (const src of session.inputSources) {
+    const gp = src.gamepad; if (!gp || src.hand) continue;
+    const y = gp.axes.length >= 4 ? gp.axes[3] : (gp.axes[1] || 0), x = gp.axes.length >= 4 ? gp.axes[2] : (gp.axes[0] || 0);
+    if (Math.abs(y) > 0.3) { st.bias = THREE.MathUtils.clamp(st.bias * Math.exp(-y * dt * 1.2), 0.2, 6); stickHold = 1; }
+    if (src.handedness === 'right' && Math.abs(x) > 0.6) {   // right stick sideways = picture size (match the real world)
+      const f = THREE.MathUtils.clamp(LS('fov', 76) + Math.sign(x) * dt * 8, 50, 110); SAVE('fov', f); fitScreen(); fitHud();
+    }
+  }
+  if (stickHold && dt) { stickHold -= dt; if (stickHold <= 0) SAVE('bias', st.bias); }
+}
+
+// ---------------------------------------------------------------- head pose history: draw each camera frame where your head was when it was taken
+const hist = []; const _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _f = new THREE.Vector3();
+function pushPose(t, p, q) { hist.push({ t, p: p.clone(), q: q.clone() }); while (hist.length > 90) hist.shift(); }
+function poseAt(t) {
+  if (!hist.length) return null;
+  for (let i = hist.length - 1; i > 0; i--) {
+    const a = hist[i - 1], b = hist[i];
+    if (a.t <= t) { const k = THREE.MathUtils.clamp((t - a.t) / Math.max(1, b.t - a.t), 0, 1); _p.lerpVectors(a.p, b.p, k); _q.slerpQuaternions(a.q, b.q, k); return true; }
+  }
+  _p.copy(hist[0].p); _q.copy(hist[0].q); return true;
+}
+
+// ---------------------------------------------------------------- loop
+let last = performance.now(), fpsN = 0, fpsT = 0, onT = -1, lastVT = -1;
+const vp = new THREE.Vector3(), vq = new THREE.Quaternion();
+function loop(time, frame) {
+  const now = performance.now(), dt = Math.min((now - last) / 1000, 0.1); last = now;
+  U.time.value = now / 1000;
+  // new camera frame -> upload it
+  if (testCanvas) { if (tex.image !== testCanvas) { tex.image = testCanvas; tex.needsUpdate = true; } }
+  else if (video.readyState >= 2 && video.currentTime !== lastVT) { lastVT = video.currentTime; tex.needsUpdate = true; }
+  if (now - meterT > 250) { meterT = now; meterLight(); }
+  const target = st.auto * st.bias; st.manual = Math.abs(st.bias - 1) > 0.05;
+  U.gain.value += (target - U.gain.value) * (1 - Math.exp(-dt * 3));
+  if (onT >= 0) { onT += dt; U.on.value = THREE.MathUtils.smoothstep(onT, 0.15, 1.3); }
+  U.flash.value = Math.max(0, U.flash.value - dt * 1.6);
+
+  if (frame) {
+    const ref = renderer.xr.getReferenceSpace(), pose = ref && frame.getViewerPose(ref);
+    if (pose) {
+      const o = pose.transform.orientation, p = pose.transform.position;
+      vp.set(p.x, p.y, p.z); vq.set(o.x, o.y, o.z, o.w); pushPose(now, vp, vq);
+      if (!poseAt(now - st.lat)) { _p.copy(vp); _q.copy(vq); }
+      _f.set(0, 0, -D).applyQuaternion(_q); screen.position.copy(_p).add(_f); screen.quaternion.copy(_q);
+    }
+    readSticks(frame.session, dt);
+  } else {
+    _f.set(0, 0, -D).applyQuaternion(camera.quaternion); screen.position.copy(camera.position).add(_f); screen.quaternion.copy(camera.quaternion);
+  }
+  drawHud();
+  renderer.render(scene, camera);
+  fpsN++; fpsT += dt; if (fpsT > 10) { diag({ fps: Math.round(fpsN / fpsT), lat: Math.round(st.lat), latN: st.latN, mean: +(st.mean || 0).toFixed(3), gain: +U.gain.value.toFixed(1), mode: U.mode.value }); fpsN = 0; fpsT = 0; }
+}
+renderer.setAnimationLoop(loop);
+
+// ---------------------------------------------------------------- start
+function powerOn() { if (Q.has('still')) { U.on.value = 1; return; } onT = 0; U.flash.value = 0.9; whine(true); }
+async function enter() {
+  initAudio();
+  go.disabled = true; msg.textContent = 'Starting the camera…';
+  const ok = await startCamera();
+  go.disabled = false;
+  if (!ok) { msg.innerHTML = 'The headset camera is blocked (' + st.camErr + ').<br>Quest Browser → ⋮ → Settings → Site permissions → Camera → Allow, then try again.'; return; }
+  if (PREVIEW) { start.style.display = 'none'; fitHud(); powerOn(); return; }
+  if (!navigator.xr || !(await navigator.xr.isSessionSupported('immersive-vr').catch(() => false))) { msg.textContent = 'Open this page in the Quest browser.'; return; }
+  try {
+    const session = await navigator.xr.requestSession('immersive-vr', { requiredFeatures: ['local'], optionalFeatures: ['hand-tracking'] });
+    renderer.xr.setReferenceSpaceType('local'); renderer.xr.setFoveation(0.5);
+    await renderer.xr.setSession(session);
+    start.style.display = 'none';
+    session.addEventListener('select', onSelect);
+    session.addEventListener('end', () => { start.style.display = 'flex'; onT = -1; U.on.value = 0; msg.textContent = 'Goggles off.'; whine(false); });
+    diag({ start: true, ua: navigator.userAgent.slice(0, 90) });
+    fitHud(); powerOn();
+  } catch (e) { msg.textContent = 'Could not start: ' + e.message; diag({ startErr: e.message }); }
+}
+go.addEventListener('click', enter);
+// ask for the camera right away (the permission popup shows here in the browser, not inside VR)
+if (!PREVIEW && !Q.has('test')) startCamera().then(ok => { if (!ok && st.camErr) msg.innerHTML = 'Allow the camera to see in the dark (' + st.camErr + ').<br>Then press GOGGLES ON.'; });
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('../sw.js', { scope: '../' }).catch(() => {});
+if (PREVIEW && Q.has('auto')) setTimeout(enter, 100);
+</script>
+</body>
+</html>
