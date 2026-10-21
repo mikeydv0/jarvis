@@ -40,7 +40,7 @@
   </div>
   <div id="msg"></div>
   <a class="nav" href="../">← J.A.R.V.I.S.</a>
-  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fd4ff;opacity:.8">VERSION 3 · THE FORCE</div>
+  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fd4ff;opacity:.8">VERSION 3.1 · THE FORCE</div>
 </div>
 <script type="module">
 import * as THREE from '../vendor/three.module.js';
@@ -501,10 +501,11 @@ function updateHands(dt, now) {
     tV.copy(h.pc).sub(head.pos); const reach = tV.dot(FWD);
     const raised = reach > 0.18 && h.pc.y > head.pos.y - 0.65;            // arm out in front, not hanging at your side
     const aimed = raised && Math.abs(h.n.dot(tV.normalize())) > 0.45;    // palm out along your reach
-    h.g = h.cl < 0.28 ? 'open' : h.cl > 0.85 ? 'fist' : 'mid';
+    h.g = h.cl < (h.mode === 'hold' ? 0.42 : 0.28) ? 'open' : h.cl > 0.85 ? 'fist' : 'mid';   // a held palm can relax a bit without counting as a squeeze
 
     if (h.g === 'open') {
-      if (h.mode === 'crush' || h.mode === 'done') { h.mode = 'none'; h.holdDelay = 0.9; }   // let go after a crush: don't instantly restart
+      if (h.mode === 'done') { h.mode = 'none'; h.holdDelay = 0.9; }   // let go after a crush: don't instantly restart
+      else if (h.mode === 'crush') h.mode = 'none';   // tracking blip or changed your mind: no penalty
       if (aimed) {
         if (h.mode !== 'hold') { h.mode = 'hold'; h.holdT = 0; }
         h.holdT += dt;
@@ -517,15 +518,17 @@ function updateHands(dt, now) {
       } else if (h.mode === 'hold') { h.mode = 'none'; h.started = false; }
     } else if (raised && h.mode !== 'done' && FAN.bound) {
       // closing your hand on it = crush
-      if (h.mode !== 'crush') { h.mode = 'crush'; h.crushT = now; h.pw0 = FAN.pw; h.started = false; }
+      if (h.mode !== 'crush') { h.mode = 'crush'; h.crushT = now; h.fistT = 0; h.pw0 = FAN.pw; h.started = false; }
       ctl = true;
       const prog = clamp((h.cl - 0.28) / 0.57, 0, 1); squeeze = Math.max(squeeze, prog);
-      if (h.g === 'fist') {
-        const ms = now - h.crushT;
+      // the fist has to HOLD for 150 ms: tracking glitches flash a fist for a frame or two when your palm faces away
+      if (h.g === 'fist' && !h.fistT) h.fistT = now; else if (h.g !== 'fist') h.fistT = 0;
+      if (h.fistT && now - h.fistT >= 150) {
+        const ms = h.fistT - h.crushT;
         if (h.pw0 > 0.5 || want.power) diagEv({ ev: ms < 280 ? 'crush-fast' : 'crush-slow', ms: Math.round(ms) });
         if (ms < 280) doKill(h.pc.clone()); else softOff();
         h.mode = 'done';
-      } else if (now - h.crushT > 120) setPw(Math.min(FAN.pw, h.pw0 * (1 - prog)));   // slow squeeze = slow fade
+      } else if (!h.fistT && now - h.crushT > 150) setPw(Math.min(FAN.pw, h.pw0 * (1 - prog)));   // slow squeeze = slow fade
     } else if (h.mode === 'hold') { h.mode = 'none'; h.started = false; }
   }
   if (rate > 0) setPw(FAN.pw + rate * dt);
