@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -40,7 +40,7 @@
   </div>
   <div id="msg"></div>
   <a class="nav" href="../">← J.A.R.V.I.S.</a>
-  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fd4ff;opacity:.8">VERSION 3.1 · THE FORCE</div>
+  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fd4ff;opacity:.8">VERSION 3.2 · THE FORCE</div>
 </div>
 <script type="module">
 import * as THREE from '../vendor/three.module.js';
@@ -472,7 +472,7 @@ function setHint(t, sub = '') {
 const DIAG_URL = 'https://ntfy.sh/mk-manhattan-q3d7x2';
 let diagLast = '', diagN = 0;
 function diag(o) {
-  if (PREVIEW || diagN > 120) return;
+  if (PREVIEW || diagN > 300) return;
   const msg = JSON.stringify(o); if (msg === diagLast) return; diagLast = msg; diagN++;
   try { fetch(DIAG_URL, { method: 'POST', mode: 'no-cors', body: msg }); } catch (e) {}
 }
@@ -499,12 +499,14 @@ function updateHands(dt, now) {
     h.shake += (tV.copy(h.vel).sub(h.velSlow).length() - h.shake) * Math.min(1, dt * 6);
     h.cl += (closureOf(h) - h.cl) * Math.min(1, dt * 25);
     tV.copy(h.pc).sub(head.pos); const reach = tV.dot(FWD);
-    const raised = reach > 0.18 && h.pc.y > head.pos.y - 0.65;            // arm out in front, not hanging at your side
-    const aimed = raised && Math.abs(h.n.dot(tV.normalize())) > 0.45;    // palm out along your reach
-    h.g = h.cl < (h.mode === 'hold' ? 0.42 : 0.28) ? 'open' : h.cl > 0.85 ? 'fist' : 'mid';   // a held palm can relax a bit without counting as a squeeze
+    const raised = reach > 0.12 && h.pc.y > head.pos.y - 0.75;            // arm out in front, not hanging at your side
+    const aimed = raised && Math.abs(h.n.dot(tV.normalize())) > 0.3;     // palm roughly out along your reach
+    h.g = h.cl < 0.5 ? 'open' : h.cl > 0.85 ? 'fist' : 'mid';   // anything not clearly squeezing counts as an open hand
+    if (h.mode === 'done' && !raised) { h.mode = 'none'; h.holdDelay = 0.5; }   // dropped your arm after a crush: ready again
+    if (raised && now - (h.dT || 0) > 3000 && h.mode !== 'hold') { h.dT = now; diagEv({ ev: 'see', side, cl: +h.cl.toFixed(2), aim: +Math.abs(h.n.dot(tV)).toFixed(2), reach: +reach.toFixed(2), mode: h.mode }); }
 
     if (h.g === 'open') {
-      if (h.mode === 'done') { h.mode = 'none'; h.holdDelay = 0.9; }   // let go after a crush: don't instantly restart
+      if (h.mode === 'done') { h.mode = 'none'; h.holdDelay = 0.5; }   // let go after a crush: don't instantly restart
       else if (h.mode === 'crush') h.mode = 'none';   // tracking blip or changed your mind: no penalty
       if (aimed) {
         if (h.mode !== 'hold') { h.mode = 'hold'; h.holdT = 0; }
@@ -520,7 +522,7 @@ function updateHands(dt, now) {
       // closing your hand on it = crush
       if (h.mode !== 'crush') { h.mode = 'crush'; h.crushT = now; h.fistT = 0; h.pw0 = FAN.pw; h.started = false; }
       ctl = true;
-      const prog = clamp((h.cl - 0.28) / 0.57, 0, 1); squeeze = Math.max(squeeze, prog);
+      const prog = clamp((h.cl - 0.5) / 0.35, 0, 1); squeeze = Math.max(squeeze, prog);
       // the fist has to HOLD for 150 ms: tracking glitches flash a fist for a frame or two when your palm faces away
       if (h.g === 'fist' && !h.fistT) h.fistT = now; else if (h.g !== 'fist') h.fistT = 0;
       if (h.fistT && now - h.fistT >= 150) {
