@@ -33,14 +33,14 @@
   <div id="link">PC LINK · CHECKING…</div>
   <button id="go">TAKE CONTROL</button>
   <div id="moves">
-    <b>PUSH</b><span>open hand, shove it forward = more wind</span>
-    <b>PRESS DOWN</b><span>flat hand, push it down = less wind</span>
-    <b>FIST</b><span>squeeze = off</span>
-    <b>BOTH HANDS</b><span>push together = MAX</span>
+    <b>HOLD YOUR HAND AT IT</b><span>the wind keeps climbing</span>
+    <b>SHAKE IT</b><span>while aiming = climbs way faster</span>
+    <b>CRUSH SLOW</b><span>close your hand slowly = fades out</span>
+    <b>CRUSH FAST</b><span>slam your fist shut = instant off</span>
   </div>
   <div id="msg"></div>
   <a class="nav" href="../">← J.A.R.V.I.S.</a>
-  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fd4ff;opacity:.8">VERSION 2 · 3 MOVES</div>
+  <div style="position:absolute;bottom:16px;font-size:14px;letter-spacing:4px;color:#7fd4ff;opacity:.8">VERSION 3 · THE FORCE</div>
 </div>
 <script type="module">
 import * as THREE from '../vendor/three.module.js';
@@ -164,10 +164,15 @@ function windSound() {
   const lfo = AC.createOscillator(); lfo.frequency.value = 6; const lfoG = AC.createGain(); lfoG.gain.value = 0.5;
   lfo.connect(lfoG); lfoG.connect(trem.gain);
   m.connect(lp); lp.connect(trem); trem.connect(mg); out(mg, false); m.start(); lfo.start();
-  Object.assign(SND, { g, bp, pan, mg, m, lfo, lp });
+  // the force hum while you hold your hand at it
+  const co = AC.createOscillator(), co2 = AC.createOscillator(), cg = AC.createGain();
+  co.type = 'sine'; co2.type = 'triangle'; co.frequency.value = 180; co2.frequency.value = 181.5; cg.gain.value = 0;
+  co.connect(cg); co2.connect(cg); out(cg); co.start(); co2.start();
+  Object.assign(SND, { g, bp, pan, mg, m, lfo, lp, co, co2, cg });
 }
 function updateSound(level, swingPan) {
   if (!AC || !SND.g) return; const t = AC.currentTime, k = level / 12;
+  SND.cg.gain.setTargetAtTime(FAN.charge * 0.08, t, 0.08); SND.co.frequency.setTargetAtTime(150 + FAN.pw * 28 + FAN.charge * 40, t, 0.1); SND.co2.frequency.setTargetAtTime(151.5 + FAN.pw * 28 + FAN.charge * 52, t, 0.1);
   SND.g.gain.setTargetAtTime(0.02 + k * 0.2 * (level > 0.05 ? 1 : 0), t, 0.25);
   if (level < 0.05) SND.g.gain.setTargetAtTime(0, t, 0.4);
   SND.bp.frequency.setTargetAtTime(260 + k * 900, t, 0.3);
@@ -193,6 +198,17 @@ function sweep(up) {
   g.gain.setValueAtTime(0.25, t); g.gain.exponentialRampToValueAtTime(0.0001, t + (up ? 0.7 : 1.0)); o.connect(f); f.connect(g); out(g); o.start(t); o.stop(t + 1.1);
   if (!up) { const n = AC.createBufferSource(), ng = AC.createGain(), nf = AC.createBiquadFilter(); n.buffer = noise(0.3); nf.type = 'lowpass'; nf.frequency.value = 900;
     ng.gain.setValueAtTime(0.5, t); ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.25); n.connect(nf); nf.connect(ng); out(ng); n.start(t); }
+}
+function crunch() {
+  if (!AC) return; const t = AC.currentTime;
+  for (let i = 0; i < 7; i++) {
+    const tt = t + i * 0.035 + Math.random() * 0.02, n = AC.createBufferSource(), f = AC.createBiquadFilter(), g = AC.createGain();
+    n.buffer = noise(0.1); f.type = 'bandpass'; f.frequency.value = rand(500, 2600); f.Q.value = 2;
+    g.gain.setValueAtTime(0.4, tt); g.gain.exponentialRampToValueAtTime(0.0001, tt + 0.09); n.connect(f); f.connect(g); out(g); n.start(tt);
+  }
+  const o = AC.createOscillator(), og = AC.createGain(), te = t + 0.2;
+  o.type = 'sine'; o.frequency.setValueAtTime(80, te); o.frequency.exponentialRampToValueAtTime(30, te + 0.5);
+  og.gain.setValueAtTime(0.9, te); og.gain.exponentialRampToValueAtTime(0.0001, te + 0.6); o.connect(og); out(og, false); o.start(te); o.stop(te + 0.65);
 }
 function tick(level) {
   if (!AC) return; const t = AC.currentTime, o = AC.createOscillator(), g = AC.createGain();
@@ -221,7 +237,7 @@ function levelColor(l, out = new THREE.Color()) {   // 1..12: cyan -> white -> o
 }
 
 // ---------------------------------------------------------------- fan hologram (sits on the real fan, always faces you)
-const FAN = { pos: new THREE.Vector3(0, 1.0, -2.2), bound: false, g: new THREE.Group(), spin: 0, ang: 0, level: 0, appear: 0 };
+const FAN = { pos: new THREE.Vector3(0, 1.0, -2.2), bound: false, g: new THREE.Group(), spin: 0, ang: 0, level: 0, appear: 0, pw: 0, squeeze: 0, crunch: 0, charge: 0 };
 scene.add(FAN.g); FAN.g.visible = false;
 const R0 = 0.21;
 const bladeShape = new THREE.Shape();
@@ -345,51 +361,33 @@ function updateFx(dt) {
 
 // ---------------------------------------------------------------- the powers (hands and controllers both land here)
 function diagEv(o) { st.lastAct = performance.now(); diag({ app: 'fan', ...o, want: { ...want }, real: { ...real }, link: LINK.ok }); }
-function powerOn(level, from, big = 1) {
-  const was = want.power; want.power = true; want.speed = clamp(level, 1, 12); command();
-  if (from) pushRing(from, FAN.pos, levelColor(want.speed).getHex(), big);
-  setTimeout(() => flash(FAN.pos, 0.6 * big, 0.5, levelColor(want.speed).getHex()), 250);
-  whoosh(big);
-  if (!was) sweep(true);
-  if (want.speed >= 12) say('max', big > 1.2); else if (!was) say('on');
-}
-function placeFan() {   // no setup: the holo fan appears 2.2 m out where you're facing, the first time you use a power
+function placeFan(h) {   // no setup: the holo fan appears 2 m out along your arm, the first time you aim at it
   if (FAN.bound) return;
-  bindFan(head.pos.clone().addScaledVector(FWD, 2.2).setY(Math.max(0.7, head.pos.y - 0.4)));
+  const d = h ? tA.copy(h.pc).sub(head.pos) : tA.copy(FWD); d.y *= 0.5; d.normalize();
+  bindFan(head.pos.clone().addScaledVector(d, 2.0).setY(clamp(head.pos.y + d.y * 2.0, 0.6, head.pos.y)));
 }
-function doPush(from, strength) {   // strength 0..1
-  placeFan();
-  const lv = !want.power ? (strength > 0.75 ? 12 : 6) : (strength > 0.75 ? 12 : want.speed + 3);
-  powerOn(lv, from, 0.8 + strength * 0.5); diagEv({ ev: 'push', s: +strength.toFixed(2) });
+// FAN.pw = the power you're holding the fan at (0..12, smooth); the real fan gets whole levels
+function setPw(pw) {
+  FAN.pw = clamp(pw, 0, 12);
+  const on = FAN.pw >= 0.5, sp = clamp(Math.ceil(FAN.pw), 1, 12);
+  if (on === want.power && (!on || sp === want.speed)) return;
+  const was = want.power; want.power = on; if (on) want.speed = sp; command();
+  if (on && !was) { sweep(true); say('on'); }
+  else if (on) { tick(sp); if (sp >= 12) say('max'); }
 }
-function doTurbo(a, b) {
-  placeFan();
-  powerOn(12, a, 1.6); if (b) pushRing(b, FAN.pos, 0xff9a50, 1.6);
-  for (let i = 0; i < WN; i++) wind.s[i] = rand(1.0, 1.8);
-  setTimeout(() => { for (let i = 0; i < WN; i++) wind.s[i] = rand(0.6, 1.2); }, 2000);
-  say('max', true); diagEv({ ev: 'turbo' });
+function softOff() {   // slow crush: it already faded down, this just lets go
+  FAN.pw = 0; if (!want.power) return;
+  want.power = false; command(); sweep(false); say('off');
 }
-function doSlow(from) {
-  placeFan(); if (!want.power) return;
-  want.speed = clamp(want.speed - 3, 1, 12); command();
-  pushRing(FAN.pos.clone().addScaledVector(UP, 0.35), FAN.pos, levelColor(want.speed).getHex(), 0.7);
-  flash(FAN.pos, 0.4, 0.4, levelColor(want.speed).getHex()); tick(want.speed); tick(want.speed - 1); diagEv({ ev: 'down' });
-}
-function doKill(from) {
-  placeFan(); if (!want.power) return;
-  want.power = false; command(); wind.suck = 0.7;
-  flash(FAN.pos, 0.8, 0.6, 0xff6a3a); sweep(false); say('off'); diagEv({ ev: 'fist' });
+function doKill(from) {   // fast crush: instant cut
+  FAN.pw = 0; if (!want.power) return;
+  want.power = false; command(); wind.suck = 0.7; FAN.crunch = 1;
+  flash(FAN.pos, 1.0, 0.6, 0xff6a3a); if (from) flash(from, 0.35, 0.4, 0xff8a4a); crunch(); say('off');
 }
 function doSwing(from) {
   placeFan();
   want.swing = !want.swing; command(); FAN.swingT = 0;
-  whoosh(0.6); say(want.swing ? 'swing_on' : 'swing_off', true); diagEv({ ev: 'swipe', swing: want.swing });
-}
-function dialTo(lv) {
-  lv = clamp(Math.round(lv), 1, 12);
-  if (lv === want.speed && want.power) return;
-  const was = want.power; want.speed = lv; want.power = true; command(); tick(lv);
-  if (!was) { sweep(true); say('on'); }
+  whoosh(0.6); say(want.swing ? 'swing_on' : 'swing_off', true); diagEv({ ev: 'swing', swing: want.swing });
 }
 function bindFan(p) {
   FAN.pos.copy(p); FAN.bound = true; FAN.appear = 0; FAN.g.visible = true;
@@ -409,6 +407,7 @@ const BONES = [];
 for (const chain of [[0, 1, 2, 3, 4], [0, 5, 6, 7, 8, 9], [0, 10, 11, 12, 13, 14], [0, 15, 16, 17, 18, 19], [0, 20, 21, 22, 23, 24]])
   for (let i = 0; i < chain.length - 1; i++) BONES.push([chain[i], chain[i + 1]]);
 BONES.push([5, 10], [10, 15], [15, 20], [6, 11], [11, 16], [16, 21]);
+const BEAM = 46;
 function makeHand(side) {
   const pts = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(25 * 3), 3)),
     new THREE.PointsMaterial({ map: glowTex, size: 0.026, color: 0x8fe4ff, ...ADD }));
@@ -416,11 +415,15 @@ function makeHand(side) {
     new THREE.LineBasicMaterial({ color: 0x5fd0ff, opacity: 0.5, ...ADD }));
   const palm = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0x6fd8ff, ...ADD }));
   palm.scale.setScalar(0.14);
+  // force beam: sparks streaming from your palm into the fan while you hold it
+  const beam = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(BEAM * 3), 3)),
+    new THREE.PointsMaterial({ map: glowTex, size: 0.035, color: 0x9fefff, opacity: 0, ...ADD }));
+  beam.frustumCulled = false; beam.ph = Float32Array.from({ length: BEAM }, () => Math.random()); beam.off = Float32Array.from({ length: BEAM * 2 }, () => rand(-1, 1));
   pts.frustumCulled = lines.frustumCulled = false;
-  scene.add(pts, lines, palm);
+  scene.add(pts, lines, palm, beam);
   return { side, pts, lines, palm, J: JOINTS.map(() => new THREE.Vector3()), has: false, g: 'none', gT: 0, rayO: new THREE.Vector3(), rayD: new THREE.Vector3(0, 0, -1), rayOK: false,
     pc: new THREE.Vector3(), prevPc: new THREE.Vector3(), vel: new THREE.Vector3(), n: new THREE.Vector3(0, 0, -1), seen: 0,
-    pinch: false, pinchY0: 0, pinchL0: 0, pushCD: 0, swipeCD: 0, openT: -9, fistT: 0, glow: 0, pushT: -9 };
+    velSlow: new THREE.Vector3(), shake: 0, sk: 0, cl: 0, mode: 'none', holdT: 0, holdDelay: 0.25, crushT: 0, pw0: 0, glow: 0, beam };
 }
 const hands = { left: makeHand('left'), right: makeHand('right') };
 const curl = (h, f) => { const w = h.J[0]; return h.J[JI[f + '-tip']].distanceTo(w) / Math.max(1e-3, h.J[JI[f + '-phalanx-proximal']].distanceTo(w)); };
@@ -475,46 +478,65 @@ function diag(o) {
 }
 addEventListener('error', e => diag({ app: 'fan', err: String(e.message), at: e.lineno }));
 
-// ---------------------------------------------------------------- gestures -> powers (3 moves, no setup)
+// ---------------------------------------------------------------- gestures -> powers
+// HOLD your open hand at it = the wind keeps climbing (shake your hand = climbs way faster)
+// CRUSH (close your hand) = it fades down with your fingers; crush FAST = instant off
 const FWD = new THREE.Vector3(), tV = new THREE.Vector3();
+const UP_RATE = 1.0, SHAKE_BOOST = 4;   // levels per second held still / extra when shaking hard
+function closureOf(h) {   // 0 = flat open hand, 1 = fist
+  let c = 0; for (const f of ['index-finger', 'middle-finger', 'ring-finger', 'pinky-finger']) c += curl(h, f);
+  return clamp((1.85 - c / 4) / 0.6, 0, 1);
+}
 function updateHands(dt, now) {
   FWD.copy(head.fwd); FWD.y = 0; FWD.normalize();
-  const pushers = [];
+  let rate = 0, ctl = false, charge = 0, squeeze = 0;
   for (const side of ['left', 'right']) {
     const h = hands[side];
-    h.pushCD -= dt;
-    if (!h.has) { h.seen = 0; h.g = 'none'; continue; }
+    if (!h.has) { h.seen = 0; if (h.mode === 'hold') { h.mode = 'none'; h.started = false; } continue; }
     handMotion(h, dt);
-    const g = classify(h);
-    if (g !== h.g) { h.g = g; h.gT = 0; } else h.gT += dt;
-    if (g === 'open') h.openT = now;
+    // shake = how hard the hand jitters around its own average motion
+    h.velSlow.lerp(h.vel, Math.min(1, dt * 3));
+    h.shake += (tV.copy(h.vel).sub(h.velSlow).length() - h.shake) * Math.min(1, dt * 6);
+    h.cl += (closureOf(h) - h.cl) * Math.min(1, dt * 25);
+    tV.copy(h.pc).sub(head.pos); const reach = tV.dot(FWD);
+    const raised = reach > 0.18 && h.pc.y > head.pos.y - 0.65;            // arm out in front, not hanging at your side
+    const aimed = raised && Math.abs(h.n.dot(tV.normalize())) > 0.45;    // palm out along your reach
+    h.g = h.cl < 0.28 ? 'open' : h.cl > 0.85 ? 'fist' : 'mid';
 
-    const along = h.vel.dot(FWD), vy = h.vel.y;
-    tV.copy(h.vel).addScaledVector(FWD, -along); tV.y = 0; const lateral = tV.length();
-    // PUSH: open hand shoved forward = more wind
-    if (g === 'open' && h.gT > 0.05 && h.pushCD <= 0 && along > 1.1 && Math.abs(h.n.dot(FWD)) > 0.3 && along > Math.abs(vy) && along > lateral) {
-      h.pushCD = 0.8; h.pushT = now; pushers.push({ h, s: clamp((along - 1.1) / 1.4, 0, 1) });
-    }
-    // PRESS DOWN: flat open hand pushed down = less wind
-    else if (g === 'open' && h.gT > 0.05 && h.pushCD <= 0 && vy < -1.0 && Math.abs(h.n.y) > 0.55 && -vy > Math.abs(along) && -vy > lateral) {
-      h.pushCD = 0.8; doSlow(h.pc.clone());
-    }
-    // FIST: squeeze shut (from an open hand, held up) = off
-    if (g === 'fist' && h.gT > 0.25 && now - h.openT < 1500 && h.pc.y > head.pos.y - 0.7 && !h.fistDone) { h.fistDone = true; doKill(h.pc.clone()); }
-    if (g !== 'fist') h.fistDone = false;
+    if (h.g === 'open') {
+      if (h.mode === 'crush' || h.mode === 'done') { h.mode = 'none'; h.holdDelay = 0.9; }   // let go after a crush: don't instantly restart
+      if (aimed) {
+        if (h.mode !== 'hold') { h.mode = 'hold'; h.holdT = 0; }
+        h.holdT += dt;
+        if (h.holdT > h.holdDelay) {
+          if (!h.started) { h.started = true; placeFan(h); diagEv({ ev: 'hold' }); }
+          h.sk = clamp((h.shake - 0.15) / 0.5, 0, 1);
+          rate += UP_RATE * (1 + h.sk * SHAKE_BOOST); ctl = true; charge = Math.max(charge, 0.5 + h.sk * 0.5);
+        } else charge = Math.max(charge, 0.2 * h.holdT / h.holdDelay);
+        if (h.holdT > 1.5) h.holdDelay = 0.25;
+      } else if (h.mode === 'hold') { h.mode = 'none'; h.started = false; }
+    } else if (raised && h.mode !== 'done' && FAN.bound) {
+      // closing your hand on it = crush
+      if (h.mode !== 'crush') { h.mode = 'crush'; h.crushT = now; h.pw0 = FAN.pw; h.started = false; }
+      ctl = true;
+      const prog = clamp((h.cl - 0.28) / 0.57, 0, 1); squeeze = Math.max(squeeze, prog);
+      if (h.g === 'fist') {
+        const ms = now - h.crushT;
+        if (h.pw0 > 0.5 || want.power) diagEv({ ev: ms < 280 ? 'crush-fast' : 'crush-slow', ms: Math.round(ms) });
+        if (ms < 280) doKill(h.pc.clone()); else softOff();
+        h.mode = 'done';
+      } else if (now - h.crushT > 120) setPw(Math.min(FAN.pw, h.pw0 * (1 - prog)));   // slow squeeze = slow fade
+    } else if (h.mode === 'hold') { h.mode = 'none'; h.started = false; }
   }
-  // two hands pushing in the same moment = MAX
-  const L = hands.left, R = hands.right;
-  if (pushers.length === 2 || (pushers.length === 1 && Math.abs(L.pushT - R.pushT) < 300 && L.has && R.has)) {
-    doTurbo(L.pc.clone(), R.pc.clone()); L.pushCD = R.pushCD = 1.0;
-  } else if (pushers.length === 1) {
-    // wait a beat for the other hand: if it never comes, it's a normal push
-    const p = pushers[0]; setTimeout(() => { const o = p.h === L ? R : L; if (Math.abs(o.pushT - p.h.pushT) >= 300 || !o.has) doPush(p.h.pc.clone(), p.s); }, 160);
-  }
+  if (rate > 0) setPw(FAN.pw + rate * dt);
+  // nobody's controlling it: follow the fan's real state (its own buttons / remote)
+  if (!ctl) { if (!want.power) FAN.pw = 0; else if (Math.abs(FAN.pw - want.speed) > 1) FAN.pw = want.speed; }
+  FAN.charge += (charge - FAN.charge) * Math.min(1, dt * 8);
+  FAN.squeeze += (squeeze - FAN.squeeze) * Math.min(1, dt * 14);
 }
 function updateHandVisual(h, dt) {
   const vis = h.has; h.pts.visible = h.lines.visible = h.palm.visible = vis;
-  if (!vis) return;
+  if (!vis) { h.beam.visible = false; return; }
   const pa = h.pts.geometry.attributes.position;
   for (let i = 0; i < 25; i++) pa.setXYZ(i, h.J[i].x, h.J[i].y, h.J[i].z);
   pa.needsUpdate = true;
@@ -522,27 +544,44 @@ function updateHandVisual(h, dt) {
   BONES.forEach(([a, b], i) => { la.setXYZ(i * 2, h.J[a].x, h.J[a].y, h.J[a].z); la.setXYZ(i * 2 + 1, h.J[b].x, h.J[b].y, h.J[b].z); });
   la.needsUpdate = true;
   h.palm.position.copy(h.pc);
-  const target = h.g === 'open' ? 0.9 : h.g === 'fist' ? 0.5 : 0.25;
+  const target = h.mode === 'hold' && h.started ? 1 : h.mode === 'crush' ? 0.8 : h.g === 'open' ? 0.45 : 0.25;
   h.glow += (target - h.glow) * Math.min(1, dt * 8);
   h.palm.material.opacity = 0.2 + h.glow * 0.6; h.palm.scale.setScalar(0.1 + h.glow * 0.12);
-  h.palm.material.color.copy(h.g === 'fist' ? C_HOT : C_LOW);
+  h.palm.material.color.copy(h.mode === 'crush' || h.mode === 'done' ? C_HOT : h.started ? levelColor(Math.max(1, FAN.pw)) : C_LOW);
+  // beam: sparks stream palm -> fan, wilder and faster when you shake
+  const b = h.beam, on = h.mode === 'hold' && h.started && FAN.bound;
+  b.material.opacity += ((on ? 0.9 : 0) - b.material.opacity) * Math.min(1, dt * 10);
+  if (b.material.opacity < 0.01) { b.visible = false; return; }
+  b.visible = true; b.material.color.copy(levelColor(Math.max(1, FAN.pw)));
+  const bp = b.geometry.attributes.position, wob = 0.015 + h.sk * 0.07;
+  tA.copy(FAN.pos).sub(h.pc); const len = tA.length(); tA.normalize();
+  tB.crossVectors(tA, UP).normalize(); tC.crossVectors(tB, tA);
+  for (let i = 0; i < BEAM; i++) {
+    b.ph[i] = (b.ph[i] + dt * (0.9 + h.sk * 2.5) * (0.7 + (i % 5) * 0.12)) % 1;
+    const t = b.ph[i], w = Math.sin(t * Math.PI) * wob, sp = Math.sin(t * 18 + i) * h.sk * 0.02;
+    bp.setXYZ(i, h.pc.x + tA.x * t * len + (tB.x * b.off[i * 2] + tC.x * b.off[i * 2 + 1]) * w + sp,
+                 h.pc.y + tA.y * t * len + (tB.y * b.off[i * 2] + tC.y * b.off[i * 2 + 1]) * w + sp,
+                 h.pc.z + tA.z * t * len + (tB.z * b.off[i * 2] + tC.z * b.off[i * 2 + 1]) * w);
+  }
+  bp.needsUpdate = true; b.material.size = 0.03 + h.sk * 0.02;
 }
 
-// controllers: trigger = push, squeeze = kill, stick up/down = dial, A/X = swing, both triggers = turbo
+// controllers: hold the trigger = wind climbs (pull it all the way = faster), squeeze grip = crush (slam it = instant off)
 const pads = {};
 function readPad(src, frame, ref) {
   const gp = src.gamepad; if (!gp) return;
-  const p = pads[src.handedness] || (pads[src.handedness] = { trig: false, sq: false, btn: false, stickT: 0, pos: new THREE.Vector3(), t: 0 });
+  const p = pads[src.handedness] || (pads[src.handedness] = { gripT: 0, gripping: false, pw0: 0, btn: false, pos: new THREE.Vector3() });
   const rp = src.targetRaySpace && frame.getPose(src.targetRaySpace, ref);
   if (rp) p.pos.copy(rp.transform.position);
-  const trig = gp.buttons[0] && gp.buttons[0].pressed, sq = gp.buttons[1] && gp.buttons[1].pressed, btn = gp.buttons[4] && gp.buttons[4].pressed;
-  if (trig && !p.trig) { p.t = performance.now(); const o = pads[src.handedness === 'left' ? 'right' : 'left'];
-    if (o && performance.now() - o.t < 250) doTurbo(p.pos.clone(), o.pos.clone()); else doPush(p.pos.clone(), 0.4); }
-  if (sq && !p.sq) doKill(p.pos.clone());
+  const tv = gp.buttons[0] ? gp.buttons[0].value : 0, gv = gp.buttons[1] ? gp.buttons[1].value : 0, btn = gp.buttons[4] && gp.buttons[4].pressed;
+  const dt = 1 / 72;
+  if (tv > 0.15) { placeFan(); setPw(FAN.pw + UP_RATE * (tv > 0.95 ? 1 + SHAKE_BOOST : 1) * dt); FAN.charge = Math.max(FAN.charge, tv); }
+  if (gv > 0.1 && !p.gripping) { p.gripping = true; p.gripT = performance.now(); p.pw0 = FAN.pw; }
+  if (p.gripping && gv > 0.95 && !p.done) { p.done = true; if (performance.now() - p.gripT < 200) doKill(p.pos.clone()); else softOff(); }
+  else if (p.gripping && !p.done) { setPw(Math.min(FAN.pw, p.pw0 * (1 - gv))); FAN.squeeze = Math.max(FAN.squeeze, gv); }
+  if (gv < 0.05) { p.gripping = false; p.done = false; }
   if (btn && !p.btn) doSwing(p.pos.clone());
-  const y = gp.axes[3] || 0;
-  if (Math.abs(y) > 0.6 && performance.now() - p.stickT > 220) { p.stickT = performance.now(); dialTo((want.power ? want.speed : 0) + (y < 0 ? 1 : -1)); }
-  p.trig = trig; p.sq = sq; p.btn = btn;
+  p.btn = btn;
 }
 
 // ---------------------------------------------------------------- fan hologram per frame
@@ -553,14 +592,16 @@ function updateFan(dt, now) {
   FAN.appear = Math.min(1, FAN.appear + dt * 2.5);
   FAN.g.position.copy(FAN.pos);
   tA.copy(head.pos); tA.y = FAN.pos.y + (head.pos.y - FAN.pos.y) * 0.3; FAN.g.lookAt(tA);   // faces you, mostly upright
-  const e = 1 - Math.pow(1 - FAN.appear, 3); FAN.g.scale.setScalar(0.3 + 0.7 * e);
+  const e = 1 - Math.pow(1 - FAN.appear, 3);
+  FAN.crunch = Math.max(0, FAN.crunch - dt * 2.5);
+  FAN.g.scale.setScalar((0.3 + 0.7 * e) * (1 - FAN.squeeze * 0.35) * (1 - Math.sin(FAN.crunch * Math.PI) * 0.4) * (1 + FAN.charge * 0.06 * Math.sin(now / 45)));
   const k = FAN.level / 12;
   FAN.spin = k * 34; FAN.ang -= FAN.spin * dt; FAN.rotor.rotation.z = FAN.ang;
   bladeMat.opacity = 0.42 - k * 0.22; bladeMat.color.copy(levelColor(Math.max(1, FAN.level)));
   FAN.blur.material.opacity = k * 0.55; FAN.blur.material.color.copy(levelColor(Math.max(1, FAN.level)));
-  FAN.hub.material.opacity = 0.5 + k * 0.5; FAN.halo.material.opacity = 0.12 + k * 0.4 + (wind.suck > 0 ? 0.3 : 0);
+  FAN.hub.material.opacity = 0.5 + k * 0.5 + FAN.charge * 0.5; FAN.halo.material.opacity = 0.12 + k * 0.4 + (wind.suck > 0 ? 0.3 : 0);
   FAN.halo.material.color.copy(levelColor(Math.max(1, FAN.level)));
-  const lit = want.power ? want.speed : 0;
+  const lit = FAN.pw > 0.05 ? Math.ceil(FAN.pw) : 0;
   FAN.segs.forEach((s, i) => { const on = i < lit; s.material.opacity += ((on ? 0.95 : 0.1) - s.material.opacity) * Math.min(1, dt * 10); s.scale.setScalar(on && i === lit - 1 ? 1 + Math.sin(now / 90) * 0.02 : 1); });
   FAN.rim.material.opacity = LINK.ok && LINK.fanOnline ? 0.8 : 0.3 + Math.abs(Math.sin(now / 300)) * 0.4;
   FAN.rim.material.color.set(LINK.ok && LINK.fanOnline ? 0xbff4ff : 0xff8a5a);
@@ -609,7 +650,7 @@ function step(dt, now) {
   hint.m.quaternion.copy(head.quat);
   if (!LINK.ok) setHint('PC LINK OFFLINE', 'double-click FAN POWERS on your PC');
   else if (!LINK.fanOnline) setHint('FAN NOT ANSWERING', 'is it plugged in?');
-  else if (st.t < 40 || now - (st.lastAct || 0) > 20000) setHint('PUSH = MORE  ·  PRESS DOWN = LESS  ·  FIST = OFF', 'face the fan · both hands push = MAX');
+  else if (st.t < 40 || now - (st.lastAct || 0) > 20000) setHint('HOLD YOUR HAND AT IT = WIND UP', 'shake it = faster  ·  crush your hand = off (slow squeeze = slow fade)');
   else setHint('');
   if (LINK.wasOk && !LINK.ok && now - (st.offT || 0) > 30000) { st.offT = now; say('offline', true); }
   LINK.wasOk = LINK.ok;
@@ -622,11 +663,9 @@ let demoT = -1; const demoDone = new Set();
 function at(t, key, f) { if (demoT >= t && !demoDone.has(key)) { demoDone.add(key); f(); } }
 function runDemo() {
   at(0.2, 'bind', () => bindFan(new THREE.Vector3(-0.1, 0.95, -1.4)));
-  at(1.0, 'push', () => doPush(new THREE.Vector3(0.25, 1.3, 0.2), 0.3));
-  at(2.0, 'dial', () => dialTo(9));
-  if (Q.has('swing')) at(2.6, 'swing', () => doSwing(new THREE.Vector3(0.3, 1.3, 0.2)));
-  if (Q.has('turbo')) at(3.0, 'turbo', () => doTurbo(new THREE.Vector3(-0.2, 1.3, 0.2), new THREE.Vector3(0.3, 1.3, 0.2)));
-  if (Q.has('kill')) at(4.0, 'kill', () => doKill(new THREE.Vector3(0.2, 1.3, 0.2)));
+  at(0.6, 'up', () => { FAN.charge = 1; });
+  if (demoT > 0.6 && demoT < 2.6 && !Q.has('kill')) setPw(FAN.pw + 4.5 / 60);
+  if (Q.has('kill')) { at(0.6, 'k0', () => setPw(9)); at(1.5, 'kill', () => doKill(new THREE.Vector3(0.2, 1.3, 0.2))); }
 }
 function demo() {
   demoT = Q.has('nodemo') ? -1 : 0; step(0, performance.now());
